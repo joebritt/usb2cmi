@@ -25,6 +25,56 @@
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
  */
 
+
+/* ---------------------------------------------------------------------------------------
+    Hardware Specifics
+ */
+ 
+#define CMI_SERIAL      Serial1           // to/from CMI
+#define KEYBD_SERIAL    Serial2           // to/from legacy keyboard
+
+#define EXP_SERIAL      Serial3
+
+#define MIDI_SERIAL     Serial4
+
+#define MODE_SEL        22                // input selects Series I/II/IIX or III mode
+
+#define R_LED           16                // activity LED
+#define G_LED           17
+
+/* ---------------------------------------------------------------------------------------
+    DL1416-style display
+    Connected via 23017 i2c port expander
+ */
+
+#include <i2c_t3.h>
+
+#define IO_EXP_RST      12    // pull low to reset, wait, then let high
+
+#define I2C_SDA_PIN     38    // SDA1 / SCL1
+#define I2C_SCL_PIN     37
+
+#define IO_EXP_ADDR     0x20  // all 3 external addr lines tied low
+
+void init_led_display_exp();
+void led_display_welcome();
+
+void putc_led_display( char c );
+
+
+/* ---------------------------------------------------------------------------------------
+    M I D I
+    Stuff
+ */
+
+#include <MIDI.h>
+
+MIDI_CREATE_INSTANCE(HardwareSerial, MIDI_SERIAL, MIDI);
+const int channel = 1;
+
+//#define MIDI_CHANNEL    MIDI_CHANNEL_OMNI
+#define MIDI_CHANNEL    1
+
 /* ---------------------------------------------------------------------------------------
     U S B
     Stuff
@@ -176,11 +226,8 @@ void OnPress( int key )
     A GPIO input is used to select Series I/II/IIX or Series III mode.
     An LED is blinked when data (keyboard or mouse) is sent to the CMI.
  */
- 
-#define CMI_SERIAL      Serial1
 
-#define MODE_SEL        2                 // input selects Series I/II/IIX or III mode
-#define ACT_LED         13                // activity/power LED
+#define ACT_LED         R_LED
 
 int loopcnt;                              // # of passes thru loop() before turning the LED back on
 char last_cmi_key;                        // set to the last key char we sent, cleared on key up, used for typematic
@@ -193,7 +240,7 @@ bool key_repeating = false;               // if true, we are repeating
 elapsedMillis keyTimeElapsed;             // measure elapsed time for key autorepeat (typematic)
 
 bool is_series_3() {
-  return true;                            // XXX TODO: read GPIO
+  return ( digitalRead( MODE_SEL ) ? true : false );
 }
 
 bool repeating_cmi_key( char c ) {
@@ -311,19 +358,48 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
 
 void setup()
 {
-  pinMode( ACT_LED, OUTPUT );
-  digitalWrite( ACT_LED, true );
+  // ===============================
+  // Set up hardware
+  
+  pinMode( MODE_SEL, INPUT_PULLUP );
+  
+  pinMode( R_LED, OUTPUT );
+  digitalWrite( R_LED, true );
 
+  pinMode( G_LED, OUTPUT );       // power on
+  digitalWrite( G_LED, false );
+  
+  // ===============================
+  // Set up console (debug) serial
+    
   Serial.begin( 115200 );
   delay( 1500 );                  // wait for serial, but don't block if it's not connected
   Serial.println("Welcome to USB Keyboard & Mouse adapter for CMI");
+
+  Serial.print("Series ");
+  Serial.print( is_series_3() ? "III" : "I / II / IIX" );
+  Serial.println(" mode selected.");
     
   Serial.println(sizeof(USBHub), DEC);
 
+  // ===============================
+  // Set up alphanumeric LED display
+  
+  init_led_display_exp();
+  led_display_welcome();
+  delay( 1000 );
+
+  // ===============================
+  // Set up CMI comms
+  
   CMI_SERIAL.begin( 9600 );       // init output port   
+  KEYBD_SERIAL.begin( 9600 );     // init legacy keyboard port   
 
   init_gpad();
 
+  // ===============================
+  // Set up USB
+  
   myusb.begin();
   
   keyboard1.attachPress(OnPress);
@@ -331,6 +407,12 @@ void setup()
 
   keyboard2.attachPress(OnPress);
   keyboard2.attachRelease(OnRelease);
+
+  // ===============================
+  // Set up MIDI
+  
+  MIDI.begin( MIDI_CHANNEL );
+  MIDI_SERIAL.begin( 31250, SERIAL_8N1_TXINV );         // our hardware is inverted on the transmit side only!
 }  
 
 
@@ -344,6 +426,28 @@ void loop()
   else
     digitalWrite( ACT_LED, true );
 
+  // ===============================
+  // Check for characters received from the CMI
+
+  if( CMI_SERIAL.available() ) {
+    char c = CMI_SERIAL.read();
+    Serial.print( "LED: ");
+    Serial.print( c );
+    Serial.print( " " );
+    Serial.println( c, HEX );
+
+    KEYBD_SERIAL.write( c );
+    putc_led_display( c );
+  }
+
+  // ===============================
+  // Check for characters received from the legacy keyboard
+
+  if( KEYBD_SERIAL.available() ) {
+    char c = KEYBD_SERIAL.read();
+    CMI_SERIAL.write( c );
+  }
+  
   // ===============================
   // Handle Typematic action (key repeat)
   
@@ -429,6 +533,271 @@ void loop()
     mouse1.mouseDataClear();
   }
 
+  // ===============================
+  // Give MIDI time
+
+  if( MIDI_SERIAL.available() ) {
+    MIDI_SERIAL.write( MIDI_SERIAL.read() );
+  }
+
+#if 0
+  {
+    int note;
+    Serial.println("sending");
+    for (note=10; note <= 20; note++) {
+      MIDI.sendNoteOn(note, 100, channel);
+      delay(200);
+      MIDI.sendNoteOff(note, 100, channel);
+    }
+    delay(200);
+  }
+#endif
+
+#if 0
+  {
+    int type, note, velocity, channel, d1, d2;
+    if (MIDI.read()) {                    // Is there a MIDI message incoming ?
+      byte type = MIDI.getType();
+      switch (type) {
+        case midi::NoteOn:
+          note = MIDI.getData1();
+          velocity = MIDI.getData2();
+          channel = MIDI.getChannel();
+          if (velocity > 0) {
+            Serial.println(String("Note On:  ch=") + channel + ", note=" + note + ", velocity=" + velocity);
+          } else {
+            Serial.println(String("Note Off: ch=") + channel + ", note=" + note);
+          }
+          break;
+        case midi::NoteOff:
+          note = MIDI.getData1();
+          velocity = MIDI.getData2();
+          channel = MIDI.getChannel();
+          Serial.println(String("Note Off: ch=") + channel + ", note=" + note + ", velocity=" + velocity);
+          break;
+        default:
+        /*
+          d1 = MIDI.getData1();
+          d2 = MIDI.getData2();
+          Serial.println(String("Message, type=") + type + ", data = " + d1 + " " + d2);
+          */
+          break;
+      }
+    }
+  }
+#endif
+
 }
+
+
+/* ---------------------------------------------------------------------------------------
+    Alphanumeric LED Displays
+ */
+
+/*
+  23017 i2c port expander -> DL1416 LED display pin mapping
+
+  GPA0      LED_A0
+  GPA1      LED_D6
+  GPA2      LED_D3
+  GPA3      LED_D2
+  GPA4      LED_D1
+  GPA5      LED_D0
+  GPA6      LED_D4
+  GPA7      LED_D5
+
+  GPB0      n/a
+  GPB1      n/a
+  GPB2      /LED_3_CS
+  GPB3      /LED_WR
+  GPB4      /LED_CU
+  GPB5      /LED_2_CS
+  GPB6      /LED_1_CS
+  GPB7      LED_A1
+*/
+
+
+/* ---------------------------------------------
+   MCP23017 i2c port expander registers
+   
+   IOCON.BANK = 0 (default)
+*/
+
+typedef unsigned char uchar;
+
+void exp_wr( uchar addr, uchar val );
+//uchar exp_rd( uchar addr );
+
+#define IODIRA          0x00      // IO Direction (1 = input, 0xff on reset)
+#define IODIRB          0x01
+#define IOPOLA          0x02      // IO Polarity (1 = invert, 0x00 on reset)
+#define IOPOLB          0x03
+#define GPINTENA        0x04      // 1 = enable interrupt on change
+#define GPINTENB        0x05
+#define DEFVALA         0x06      // default compare values for interrupt on change, 0xoo on reset
+#define DEFVALB         0x07
+#define INTCONA         0x08      // 1 = pin compared to DEFVAL, 0 = pin compare to previous pin value
+#define INTCONB         0x09
+#define IOCON           0x0a      // see bit definitions below
+//#define IOCON           0x0b    // duplicate
+#define GPPUA           0x0c      // 1 = pin pullup enabled, 0x00 on reset
+#define GPPUB           0x0d
+#define INTFA           0x0e      // interrupt flags, 1 = associated pin caused interrupt
+#define INTFB           0x0f
+#define INTCAPA         0x10      // interrupt capture, holds GPIO port values when interrupt occurred
+#define INTCAPB         0x11
+#define GPIOA           0x12      // read: value on port, write: modify OLAT (output latch) register
+#define GPIOB           0x13
+#define OLATA           0x14      // read: value in OLAT, write: modify OLAT
+#define OLATB           0x15
+
+// IOCON bit values
+
+#define IOCON_BANK      0x80      // 1: regs in different banks, 0: regs in same bank (addrs are seq, default)
+#define IOCON_MIRROR    0x40      // 1: 2 INT pins are OR'ed, 0: 2 INT pins are independent (default)
+#define IOCON_SEQOP     0x20      // 1: sequential ops disabled, addr ptr does NOT increment, 0: addr ptr increments (default)
+#define IOCON_ODR       0x04      // 1: INT pin is Open Drain, 0: INT pin is active drive (default)
+#define IOCON_INTPOL    0x02      // 1: INT pin is active hi, 0: INT pin is active lo (default)
+#define IOCON_INTCC     0x01      // 1: reading INTCAP clears interrupt, 0: reading GPIO reg clears interrupt (default)
+
+
+void exp_wr( uchar addr, uchar val ) {
+  Wire1.beginTransmission( IO_EXP_ADDR );
+  Wire1.write( addr );
+  Wire1.write( val );
+  Wire1.endTransmission();
+}
+
+
+void init_led_display_exp() {  
+  pinMode( IO_EXP_RST, OUTPUT );      // hard reset the part
+  digitalWrite( IO_EXP_RST, 0 );  
+  delay( 2 );                         // let it out of reset
+  digitalWrite( IO_EXP_RST, 1 );
+  
+  // crank up i2c
+  Wire1.begin();
+  Wire1.setOpMode(I2C_OP_MODE_IMM);
+
+  Serial.print("initializing port expander...");  
+  
+  exp_wr( OLATA,    0xff );           // LED pins hi
+  exp_wr( IODIRA,   0x00 );           // all port A pins OUTPUTS
+
+  exp_wr( OLATB,    0xff );
+  exp_wr( IODIRB,   0x03 );           // port B[7:3] are OUTPUTS, B[1:0] are INPUTS
+
+  Serial.println("Done!");
+}
+
+
+/*
+       0  0
+       D6 1
+       D3 2
+       D2 3
+       D1 4
+       D0 5
+       D4 6
+       D5 7
+*/
+
+char led_data_swizzle( char c ) {
+  char r = 0;
+
+  r |=  (c & 0x01) << 5;            // 0
+  r |=  ((c & 0x02) >> 1) << 4;     // 1
+  r |=  ((c & 0x04) >> 2) << 3;     // 2
+  r |=  ((c & 0x08) >> 3) << 2;     // 3
+  r |=  ((c & 0x10) >> 4) << 6;     // 4
+  r |=  ((c & 0x20) >> 5) << 7;     // 5
+  r |=  ((c & 0x40) >> 6) << 1;     // 6
+
+  return r;
+}
+
+
+void put_led_char( int pos, char c ) {
+  uchar portA;
+  uchar portB;
+  uchar portB_CS_sel;
+
+  pos ^= 0x03;
+  
+  // ---------------------------
+  // Set up the data bus
+
+  portA = led_data_swizzle( c );
+  portA |= (pos & 0x01);            // get LED_A0 into bit 0 of GPIOA
+  exp_wr( GPIOA,    portA);         // set up swizzled data and LED_A0
+
+  // ---------------------------
+  // figure out which chip select                                
+  
+  if( pos < 4 )
+    portB_CS_sel = ~0x04;
+  else
+    if( pos < 8 )
+      portB_CS_sel = ~0x20;
+    else
+      portB_CS_sel = ~0x40;
+
+  // ---------------------------
+  // run a bus cycle to write the swizzled char data
+  
+  portB = 0x7c;                     // A1 = 0, CU = 1, WR = 1, CS = 1
+  portB |= ((pos & 0x02) << 6);     // get LED_A1 into bit 7 of GPIOB
+  
+  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU =1, WR = 1, CS = 1
+
+  portB &= portB_CS_sel;            // drop the right /CS
+  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU = 1, WR = 1, CS = 0
+
+  portB &= 0xf4;                    // drop /WR
+  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU = 1, WR = 0, CS = 0
+  
+  exp_wr( GPIOB,    0xff );         // A1 = 1, CU = 1, WR = 1, CS = 1 
+}
+
+
+int curpos = 0;
+
+void putc_led_display( char c ) {
+  if( isprint( c ) ) {
+    if( curpos == 12 )
+      curpos = 0;
+
+    put_led_char( curpos, c );
+    curpos++;
+  } else
+    if( (c == 0x0a) || (c == 0x0d) ) {
+      curpos = 0;
+    }
+
+  //Serial.println(curpos);
+}
+
+
+void led_display_welcome() {
+
+  putc_led_display( 0x0d );
+  for( int xxx = 0; xxx != 12; xxx++ )
+    putc_led_display( ' ' );
+    
+  putc_led_display( 'R' );
+  putc_led_display( 'E' );
+  putc_led_display( 'D' );
+  putc_led_display( 'K' );
+  putc_led_display( 'E' );
+  putc_led_display( 'Y' );
+  putc_led_display( ' ' );
+  putc_led_display( 'V' );
+  putc_led_display( '1' );
+  putc_led_display( '.' );
+  putc_led_display( '0' );
+
+  curpos = 0;
+}
+
 
 
