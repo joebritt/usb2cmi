@@ -353,6 +353,134 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
 
 
 /* ---------------------------------------------------------------------------------------
+    midi
+
+    CMI Series I/II/IIX use a proprietary protocol between the music keyboard and the CMI.
+    Each event message is 3 bytes long:
+
+    Control 1:    0xD5  0x80  val (80-FF, 80 is lowest)
+    Control 2:    0xD5  0x81  val
+    Control 3:    0xD5  0x82  val
+
+    Switch 1:     0xD3  0x80  val (80 = UP, FF = DOWN)
+    Switch 2:     0xD3  0x81  val
+
+    Music Keys
+    ----------
+
+    Lowest note on master KB is F0.
+    16 velocity values, from 0xF0 (fastest) to 0xFF (fastest)
+
+    F0            Note on: 0xC1 0x80  vel     /       Note off: 0xC0 0x80 0x80
+    F#0                    0xC1 0x81  vel     /                 0xC0 0x81 0x80
+    G0                     0xC1 0x82  vel     /                 0xC0 0x82 0x80
+    ...
+
+    PITCHBEND controller is mappted to CMI Control 1
+
+    
+    XXX TODO:
+
+    - change midi channel from keypad
+    - other continuous controllers
+    - channelizer for SIII
+ */
+
+#define CMI_F0_NOTE_VAL         0x80                // F0 on master keyboard
+#define MIDI_F0_NOTE_VAL        0x11
+#define CMI_NOTE_DIFF           ( CMI_F0_NOTE_VAL - MIDI_F0_NOTE_VAL )
+
+#define CMI_MIDI_CHANNEL        1
+
+void send_cmi_music_kb( uint8_t c ) {
+  CMI_SERIAL.write( c );
+
+  //Serial.print("M: ");
+  //Serial.println( c, HEX );
+}
+
+
+void handle_midi() {
+  if( is_series_3() ) {                             // SIII just takes MIDI from music kb
+    if( MIDI_SERIAL.available() )
+      MIDI_SERIAL.write( MIDI_SERIAL.read() );
+  }
+  else {
+    int note, velocity, channel;
+    byte type;
+    
+    if (MIDI.read()) {                                                    // Is there a MIDI message incoming ?
+      type = MIDI.getType();
+      channel = MIDI.getChannel();
+
+      if( channel == CMI_MIDI_CHANNEL ) {
+        switch (type) {
+          
+          case midi::NoteOn:
+            note = MIDI.getData1();
+            velocity = MIDI.getData2();
+          
+            if (velocity > 0) {
+              //Serial.println(String("Note On:  ch=") + channel + ", note=" + note + ", velocity=" + velocity);
+  
+              send_cmi_music_kb( 0xC1 );                                     // note on
+              send_cmi_music_kb( note + CMI_NOTE_DIFF );                     // convert MIDI note to CMI note
+              send_cmi_music_kb( map( velocity, 0x00, 0x7f, 0xFF, 0xF0 ) );  // CMI has 16 velocity values, reversed sense
+              
+            } else {
+              //Serial.println(String("Note Off: ch=") + channel + ", note=" + note);
+  
+              send_cmi_music_kb( 0xC0 );                                     // note off
+              send_cmi_music_kb( note + CMI_NOTE_DIFF );                     // convert MIDI note to CMI note
+              send_cmi_music_kb( 0x80 );                                     // always sent on note off
+            
+            }
+            break;
+        
+          case midi::NoteOff:
+            note = MIDI.getData1();
+            velocity = MIDI.getData2();
+      
+            //Serial.println(String("Note Off: ch=") + channel + ", note=" + note + ", velocity=" + velocity);
+  
+            send_cmi_music_kb( 0xC0 );                                       // note off
+            send_cmi_music_kb( note + CMI_NOTE_DIFF );                       // convert MIDI note to CMI note
+            send_cmi_music_kb( 0x80 );                                       // always sent on note off
+
+            break;
+  
+          case midi::PitchBend:  
+
+            send_cmi_music_kb( 0xD5 );
+            send_cmi_music_kb( 0x80 );
+            send_cmi_music_kb( map( MIDI.getData2(), 0x00, 0x7F, 0x80, 0xFF ) );
+            
+            //Serial.print("CC: ");
+            //Serial.print( MIDI.getData1(), HEX );
+            //Serial.print(" ");
+            //Serial.println( MIDI.getData2(), HEX );
+            
+            break;
+
+   
+          default:  
+
+            Serial.print("DEF: ");
+            Serial.print( type, HEX );           
+            Serial.print(" ");
+            Serial.print( MIDI.getData1(), HEX );
+            Serial.print(" ");
+            Serial.println( MIDI.getData2(), HEX );
+            
+            break;
+        }
+      }
+    }
+  }
+}
+
+
+/* ---------------------------------------------------------------------------------------
     setup & loop
  */
 
@@ -437,6 +565,7 @@ void loop()
     Serial.println( c, HEX );
 
     KEYBD_SERIAL.write( c );
+    delay(1);                             // XXX hack -- without this, legacy music kb led display sometimes shows same char in pos 1 & 2
     putc_led_display( c );
   }
 
@@ -446,6 +575,9 @@ void loop()
   if( KEYBD_SERIAL.available() ) {
     char c = KEYBD_SERIAL.read();
     CMI_SERIAL.write( c );
+
+    Serial.print("K: ");                                      // for figuring out what the music KB sends
+    Serial.println(c, HEX);
   }
   
   // ===============================
@@ -536,56 +668,7 @@ void loop()
   // ===============================
   // Give MIDI time
 
-  if( MIDI_SERIAL.available() ) {
-    MIDI_SERIAL.write( MIDI_SERIAL.read() );
-  }
-
-#if 0
-  {
-    int note;
-    Serial.println("sending");
-    for (note=10; note <= 20; note++) {
-      MIDI.sendNoteOn(note, 100, channel);
-      delay(200);
-      MIDI.sendNoteOff(note, 100, channel);
-    }
-    delay(200);
-  }
-#endif
-
-#if 0
-  {
-    int type, note, velocity, channel, d1, d2;
-    if (MIDI.read()) {                    // Is there a MIDI message incoming ?
-      byte type = MIDI.getType();
-      switch (type) {
-        case midi::NoteOn:
-          note = MIDI.getData1();
-          velocity = MIDI.getData2();
-          channel = MIDI.getChannel();
-          if (velocity > 0) {
-            Serial.println(String("Note On:  ch=") + channel + ", note=" + note + ", velocity=" + velocity);
-          } else {
-            Serial.println(String("Note Off: ch=") + channel + ", note=" + note);
-          }
-          break;
-        case midi::NoteOff:
-          note = MIDI.getData1();
-          velocity = MIDI.getData2();
-          channel = MIDI.getChannel();
-          Serial.println(String("Note Off: ch=") + channel + ", note=" + note + ", velocity=" + velocity);
-          break;
-        default:
-        /*
-          d1 = MIDI.getData1();
-          d2 = MIDI.getData2();
-          Serial.println(String("Message, type=") + type + ", data = " + d1 + " " + d2);
-          */
-          break;
-      }
-    }
-  }
-#endif
+  handle_midi();
 
 }
 
