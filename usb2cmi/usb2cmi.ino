@@ -727,6 +727,8 @@ typedef unsigned char uchar;
 void exp_wr( uchar addr, uchar val );
 uchar exp_rd( uchar addr );
 
+bool no_expander_found = false;   // used to bypass i2c operations if we don't find the port expander at boot
+
 #define IODIRA          0x00      // IO Direction (1 = input, 0xff on reset)
 #define IODIRB          0x01
 #define IOPOLA          0x02      // IO Polarity (1 = invert, 0x00 on reset)
@@ -761,10 +763,16 @@ uchar exp_rd( uchar addr );
 
 
 void exp_wr( uchar addr, uchar val ) {
+  byte err;
+  
   Wire1.beginTransmission( IO_EXP_ADDR );
   Wire1.write( addr );
   Wire1.write( val );
-  Wire1.endTransmission();
+  err = Wire1.endTransmission();
+
+  if( err != 0 ) {
+    no_expander_found = true;         // bummer, we don't seem to have the i2c expander
+  }
 }
 
 uchar exp_rd( uchar addr ) {
@@ -792,13 +800,19 @@ void init_led_display_exp() {
 
   Serial.print("initializing port expander...");  
   
-  exp_wr( OLATA,    0xff );           // LED pins hi
-  exp_wr( IODIRA,   0x00 );           // all port A pins OUTPUTS
+  exp_wr( OLATA,    0xff );             // LED pins hi, and also probe for the i2c expander
+  
+  if( no_expander_found == false ) {    // do we have one?
+    exp_wr( IODIRA,   0x00 );           // all port A pins OUTPUTS
+  
+    exp_wr( OLATB,    0xff );
+    exp_wr( IODIRB,   0x03 );           // port B[7:3] are OUTPUTS, B[1:0] are INPUTS
 
-  exp_wr( OLATB,    0xff );
-  exp_wr( IODIRB,   0x03 );           // port B[7:3] are OUTPUTS, B[1:0] are INPUTS
-
-  Serial.println("Done!");
+    Serial.println(" LED/Keypad found, right on! ");
+  }
+  else {
+    Serial.println(" -->No LED/Keypad found, bummer! ");
+  }
 }
 
 /*  Take in a byte in normal bit order, return a byte with data bits swizzled as hardware is connected.
@@ -921,6 +935,10 @@ void keypad_col_pullups_enable( bool en ) {
 
 
 void init_keypad() {
+  
+  if( no_expander_found )              // don't try to init if no expander fitted
+    return;
+      
   Serial.print("initializing keypad...");
   
   keypad_col_pullups_enable( false );
@@ -991,6 +1009,9 @@ bool went_down( int row, char mask ) {
 
 void scan_keypad() {
   
+  if( no_expander_found )                                                                       // don't try to scan if no expander fitted
+    return;
+  
   switch( keyscan_state ) {
     case KEY_STATE_IDLE:          keypad_col_pullups_enable( true );                            // turn on pullups for the scan. LED code may turn off.
                                   drive_count_loops = 0;
@@ -1041,6 +1062,9 @@ void put_led_char( int pos, char c ) {
   uchar portB;
   uchar portB_CS_sel;
 
+  if( no_expander_found )                   // don't try to talk to LED displayes if no expander fitted
+    return;
+    
   reset_keypad_scan();                      // make sure the keypad scanner doesn't get in our way
   
   pos ^= 0x03;
