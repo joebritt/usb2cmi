@@ -57,9 +57,10 @@
 #define IO_EXP_ADDR     0x20  // all 3 external addr lines tied low
 
 void init_led_display_exp();
-void led_display_welcome();
 
+void blank_led_display();
 void putc_led_display( char c );
+void led_display_string( char *s );
 
 
 /* ---------------------------------------------------------------------------------------
@@ -243,6 +244,18 @@ bool is_series_3() {
   return ( digitalRead( MODE_SEL ) ? true : false );
 }
 
+void send_cmi_char( char c ) {            // send a char that we want to flicker the LED for
+    digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
+    loopcnt = 10000;  
+
+    if( !is_series_3() )                    // CMI just expects ASCII, no key-ups. Only send lower case to SIII
+      c = toupper( c );
+  
+    DEBUG_HEX( c );
+    CMI_SERIAL.write( c );    
+}
+
+
 bool repeating_cmi_key( char c ) {
   if( isprint( c ) || (c == 0x7f) )       // printable char OR rub out / backspace
     return true;
@@ -259,15 +272,7 @@ void send_cmi_key( char c ) {
   if( (c & 0x80) && !is_series_3() ) {      // if it's an SIII-only key and we are in I/II/IIX mode, don't send it
     return;
   } else {
-    digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
-    loopcnt = 10000;                        // countdown for main loop
-  
-    if( !is_series_3() )                    // CMI just expects ASCII, no key-ups. Only send lower case to SIII
-      c = toupper( c );
-  
-    DEBUG_HEX( c );
-    CMI_SERIAL.write( c );
-  
+    send_cmi_char( c );                     // handles flickering status LED and uppercasing if not in SIII mode  
     last_cmi_key = c;
     keyTimeElapsed = 0;                     // start timer for delay-until-repeat
   }
@@ -494,14 +499,14 @@ void setup()
   pinMode( R_LED, OUTPUT );
   digitalWrite( R_LED, true );
 
-  pinMode( G_LED, OUTPUT );       // power on
+  pinMode( G_LED, OUTPUT );                 // power on
   digitalWrite( G_LED, false );
   
   // ===============================
   // Set up console (debug) serial
     
   Serial.begin( 115200 );
-  delay( 1500 );                  // wait for serial, but don't block if it's not connected
+  delay( 1500 );                            // wait for serial, but don't block if it's not connected
   Serial.println("Welcome to USB Keyboard & Mouse adapter for CMI");
 
   Serial.print("Series ");
@@ -514,8 +519,10 @@ void setup()
   // Set up alphanumeric LED display
   
   init_led_display_exp();
-  led_display_welcome();
+  
+  led_display_string((char*)"VERSION 1.0 ");
   delay( 1000 );
+  led_display_string((char*)"  POWER ON  ");
 
   // ===============================
   // Set up CMI comms
@@ -541,6 +548,11 @@ void setup()
   
   MIDI.begin( MIDI_CHANNEL );
   MIDI_SERIAL.begin( 31250, SERIAL_8N1_TXINV );         // our hardware is inverted on the transmit side only!
+
+  // ===============================
+  // Set up keypad I/Os
+
+  init_keypad();
 }  
 
 
@@ -670,6 +682,10 @@ void loop()
 
   handle_midi();
 
+  // ===============================
+  // Scan the keypad
+
+  scan_keypad();
 }
 
 
@@ -709,7 +725,7 @@ void loop()
 typedef unsigned char uchar;
 
 void exp_wr( uchar addr, uchar val );
-//uchar exp_rd( uchar addr );
+uchar exp_rd( uchar addr );
 
 #define IODIRA          0x00      // IO Direction (1 = input, 0xff on reset)
 #define IODIRB          0x01
@@ -751,6 +767,18 @@ void exp_wr( uchar addr, uchar val ) {
   Wire1.endTransmission();
 }
 
+uchar exp_rd( uchar addr ) {
+  uchar r;
+  
+  Wire1.beginTransmission( IO_EXP_ADDR );
+  Wire1.write( addr );
+  Wire1.endTransmission();  
+
+  Wire1.requestFrom( IO_EXP_ADDR, 1 );
+  r = Wire1.read();
+  
+  return r;
+}
 
 void init_led_display_exp() {  
   pinMode( IO_EXP_RST, OUTPUT );      // hard reset the part
@@ -773,8 +801,8 @@ void init_led_display_exp() {
   Serial.println("Done!");
 }
 
+/*  Take in a byte in normal bit order, return a byte with data bits swizzled as hardware is connected.
 
-/*
        0  0
        D6 1
        D3 2
@@ -800,19 +828,229 @@ char led_data_swizzle( char c ) {
 }
 
 
+/*  ---------------------------
+    Keypad
+
+    Keypad rows are driven with LED Data lines:
+
+    D4 (GPA6) -> Row 0
+    D0 (GPA5) -> Row 1
+    D1 (GPA4) -> Row 2
+    D2 (GPA3) -> Row 3
+
+    2 column bits are read back on the i2c port expander.
+    The other 2 column bits are read back on pin 8 () and pin 5 () of the expansion connector.
+
+    Col 0 -> i2c GPB1
+    Col 1 -> i2c GPB0
+    Col 2 -> exp pin 5 (digital pin 7)
+    Col 3 -> exp pin 8 (digital pin 11)
+
+    To scan:
+
+    >>> Put this after potential LED update in loop()
+
+    0. initialize drive_count_loops = 0
+    1. Drive current row low, others high (LED data)
+    2. drive_count_loops++;
+    3. drive_count_loops >= 3?
+       YES -> sample columns, XOR to see what changed, send char on key downs
+
+*/
+
+#define ROW_0_LOW     0b10111111      // GPA6
+#define ROW_1_LOW     0b11011111      // GPA5
+#define ROW_2_LOW     0b11101111      // GPA4
+#define ROW_3_LOW     0b11110111      // GPA3
+
+#define ROW_LOOPS     5000            // still very responsive, but enough time for weak pullups in the 23017 & to debounce
+
+int drive_count_loops;
+int cur_row;                          // row we are scanning now. goes from 0->3->0
+
+char matrix_cur[4];                   // current state, only low 4 bits of each byte are used
+char matrix_last[4];                  // last state, use xor to figure out if any changed
+
+// key map tables, [row][col]
+
+char keymap[4][4] = { { '1', '4', '7', '*' },
+                      { '2', '5', '8', '0' },
+                      { '3', '6', '9', '#' },
+                      { 'A', 'B', 'C', 'D' } };
+
+
+// drive one row low. -1 = all high.
+
+void drive_row( int r ) {
+  switch( r ) {
+    case 0:   exp_wr( GPIOA, ROW_0_LOW );     break;
+    case 1:   exp_wr( GPIOA, ROW_1_LOW );     break;
+    case 2:   exp_wr( GPIOA, ROW_2_LOW );     break;
+    case 3:   exp_wr( GPIOA, ROW_3_LOW );     break;
+    default:  exp_wr( GPIOA, 0xff );          break;
+  }
+}
+
+// return true (read a 0) or false (read a 1)
+
+bool read_col( int c ) {
+  bool r = false;
+  
+  switch( c ) {
+    case 0:     r = (exp_rd( GPIOB ) & 0b00000010);     break;
+    case 1:     r = (exp_rd( GPIOB ) & 0b00000001);     break;
+    case 2:     r = digitalRead( 7 );                   break;
+    case 3:     r = digitalRead( 11 );                  break;
+  }
+
+  return r;
+}
+
+
+void keypad_col_pullups_enable( bool en ) {
+  if( en ) {
+    exp_wr( GPPUB,   0x03 );           // port B[1:0] INPUTS have pullups ENABLED
+    pinMode( 7,   INPUT_PULLUP );
+    pinMode( 11,  INPUT_PULLUP );
+  } else {
+    exp_wr( GPPUB,   0x00 );           // port B[1:0] INPUTS have pullups ENABLED
+    pinMode( 7,   INPUT );
+    pinMode( 11,  INPUT );
+  }
+}
+
+
+void init_keypad() {
+  Serial.print("initializing keypad...");
+  
+  keypad_col_pullups_enable( false );
+
+  drive_count_loops = 0;
+  cur_row = 0;
+
+  matrix_cur[0] = 0;
+  matrix_cur[1] = 0;
+  matrix_cur[2] = 0;
+  matrix_cur[3] = 0;
+
+  matrix_last[0] = 0;
+  matrix_last[1] = 0;
+  matrix_last[2] = 0;
+  matrix_last[3] = 0;
+  
+  Serial.println("done!");
+}
+
+
+/*  LED data lines are used as the row drivers, so some caution must be used when scanning the keypad.
+
+    We need the column inputs to normally be just inputs (no pullups) so they don't interfere with the data lines for
+     real LED display writes.
+     
+    But to do a scan, we need to drive a row (data line) low, the others high, wait, and sample the column inputs.
+    But we don't want to just spinwait after driving the row. That would introduce latency for handling incoming real-time
+     (MIDI, keyboard) events.
+
+    So, the LED and keypad code have to coordinate. Most of the time we are not writing to the LED displays. So, the common
+     path through loop() is:
+
+    1. drive a row
+    2. wait some number of loop()s
+    3. sample the columns for that row
+    4. update keypad state change bitmaps
+    5. send chars if we just saw key downs (no key up events)
+    6. next row, goto 1
+
+    This is driven with a state machine. If an LED write happens, the state machine is reset.
+
+    We implement this interlock/reset at the low level (here), so that otehr implementations without this hardware
+     restriction don't have to worry about it.
+*/
+
+#define KEY_STATE_IDLE                0           // keypad scan state machine states
+#define KEY_STATE_DRIVE_ROW           1
+#define KEY_STATE_WAIT_LOOP           2
+#define KEY_STATE_SAMPLE_COLS         3
+
+int keyscan_state = KEY_STATE_IDLE;
+
+int scan_row;                                     // row currently driving low
+
+
+void keypad_send( char c ) {                      // send keypad keypresses to CMI
+  Serial.print("keypad: ");
+  Serial.println( c );
+  send_cmi_char( c );                             // no autorepeat, handle flickering status LED
+}
+
+
+bool went_down( int row, char mask ) {
+  return( ((matrix_cur[row] ^ matrix_last[row]) & mask) && (matrix_cur[row] & mask) );          // changed and is now down?
+}
+
+
+void scan_keypad() {
+  
+  switch( keyscan_state ) {
+    case KEY_STATE_IDLE:          keypad_col_pullups_enable( true );                            // turn on pullups for the scan. LED code may turn off.
+                                  drive_count_loops = 0;
+                                  cur_row++;
+                                  if( cur_row == 4 )
+                                    cur_row = 0;
+                                  keyscan_state = KEY_STATE_DRIVE_ROW;
+                                  break;
+                                  
+    case KEY_STATE_DRIVE_ROW:     drive_row( cur_row ); 
+                                  keyscan_state = KEY_STATE_WAIT_LOOP;
+                                  break;                            
+                                  
+    case KEY_STATE_WAIT_LOOP:     if( drive_count_loops++ > ROW_LOOPS )
+                                    keyscan_state = KEY_STATE_SAMPLE_COLS;
+                                  break;
+                                  
+    case KEY_STATE_SAMPLE_COLS:   matrix_last[cur_row] = matrix_cur[cur_row];                   // remember what they were
+    
+                                  matrix_cur[cur_row] =  ( read_col( 0 ) ? (0<<0) : (1<<0) );   // see what they are now
+                                  matrix_cur[cur_row] |= ( read_col( 1 ) ? (0<<1) : (1<<1) );
+                                  matrix_cur[cur_row] |= ( read_col( 2 ) ? (0<<2) : (1<<2) );
+                                  matrix_cur[cur_row] |= ( read_col( 3 ) ? (0<<3) : (1<<3) );
+                         
+                                  // send ASCII for any keys that are down. no autorepeat.
+                                  
+                                  if( went_down( cur_row, 0x01 ) ) keypad_send( keymap[cur_row][0] );
+                                  if( went_down( cur_row, 0x02 ) ) keypad_send( keymap[cur_row][1] );
+                                  if( went_down( cur_row, 0x04 ) ) keypad_send( keymap[cur_row][2] );
+                                  if( went_down( cur_row, 0x08 ) ) keypad_send( keymap[cur_row][3] );
+                                  
+                                  keyscan_state = KEY_STATE_IDLE;
+                                  break;  
+  }
+}
+
+
+
+void reset_keypad_scan() {
+  keypad_col_pullups_enable( false );       // pullups off so they don't interfere with LED data
+  keyscan_state = KEY_STATE_IDLE;           // reset the scanner, will continue after LED write is done
+}
+
+
+
 void put_led_char( int pos, char c ) {
   uchar portA;
   uchar portB;
   uchar portB_CS_sel;
 
+  reset_keypad_scan();                      // make sure the keypad scanner doesn't get in our way
+  
   pos ^= 0x03;
   
   // ---------------------------
   // Set up the data bus
 
   portA = led_data_swizzle( c );
-  portA |= (pos & 0x01);            // get LED_A0 into bit 0 of GPIOA
-  exp_wr( GPIOA,    portA);         // set up swizzled data and LED_A0
+  portA |= (pos & 0x01);                    // get LED_A0 into bit 0 of GPIOA
+  exp_wr( GPIOA,    portA);                 // set up swizzled data and LED_A0
 
   // ---------------------------
   // figure out which chip select                                
@@ -828,18 +1066,18 @@ void put_led_char( int pos, char c ) {
   // ---------------------------
   // run a bus cycle to write the swizzled char data
   
-  portB = 0x7c;                     // A1 = 0, CU = 1, WR = 1, CS = 1
-  portB |= ((pos & 0x02) << 6);     // get LED_A1 into bit 7 of GPIOB
+  portB = 0x7c;                             // A1 = 0, CU = 1, WR = 1, CS = 1
+  portB |= ((pos & 0x02) << 6);             // get LED_A1 into bit 7 of GPIOB
   
-  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU =1, WR = 1, CS = 1
+  exp_wr( GPIOB,    portB );                // A1 = LED_A1, CU =1, WR = 1, CS = 1
 
-  portB &= portB_CS_sel;            // drop the right /CS
-  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU = 1, WR = 1, CS = 0
+  portB &= portB_CS_sel;                    // drop the right /CS
+  exp_wr( GPIOB,    portB );                // A1 = LED_A1, CU = 1, WR = 1, CS = 0
 
-  portB &= 0xf4;                    // drop /WR
-  exp_wr( GPIOB,    portB );        // A1 = LED_A1, CU = 1, WR = 0, CS = 0
+  portB &= 0xf4;                            // drop /WR
+  exp_wr( GPIOB,    portB );                // A1 = LED_A1, CU = 1, WR = 0, CS = 0
   
-  exp_wr( GPIOB,    0xff );         // A1 = 1, CU = 1, WR = 1, CS = 1 
+  exp_wr( GPIOB,    0xff );                 // A1 = 1, CU = 1, WR = 1, CS = 1 
 }
 
 
@@ -860,27 +1098,19 @@ void putc_led_display( char c ) {
   //Serial.println(curpos);
 }
 
-
-void led_display_welcome() {
-
+void blank_led_display() {
   putc_led_display( 0x0d );
   for( int xxx = 0; xxx != 12; xxx++ )
-    putc_led_display( ' ' );
-    
-  putc_led_display( 'R' );
-  putc_led_display( 'E' );
-  putc_led_display( 'D' );
-  putc_led_display( 'K' );
-  putc_led_display( 'E' );
-  putc_led_display( 'Y' );
-  putc_led_display( ' ' );
-  putc_led_display( 'V' );
-  putc_led_display( '1' );
-  putc_led_display( '.' );
-  putc_led_display( '0' );
-
-  curpos = 0;
+    putc_led_display( ' ' );  
 }
 
-
+void led_display_string( char *s ) {
+  blank_led_display();
+  for( int xxx = 0; xxx != 12; xxx++ ) {
+    if( s[xxx] )
+      putc_led_display( s[xxx] );
+    else
+      break;
+  }
+}
 
