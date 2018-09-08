@@ -71,10 +71,10 @@ void led_display_string( char *s );
 #include <MIDI.h>
 
 MIDI_CREATE_INSTANCE(HardwareSerial, MIDI_SERIAL, MIDI);
-const int channel = 1;
+const int midi_chan = 1;
 
-//#define MIDI_CHANNEL    MIDI_CHANNEL_OMNI
-#define MIDI_CHANNEL    1
+#define MIDI_CHANNEL    midi_chan
+
 
 /* ---------------------------------------------------------------------------------------
     U S B
@@ -216,7 +216,7 @@ void OnPress( int key )
     The original (I/II/IIX) and III keyboards both send ASCII for keypresses.
     No key-up messages, just simple ASCII sent on key-down.
 
-    The keyboard does to delay-until-repeat and auto-repeat (Typematic), we emulate that behavior.
+    The keyboard does delay-until-repeat and auto-repeat (Typematic), we emulate that behavior.
 
     The Series III keyboard G-Pad sends 6-byte movement packets, with the first byte always = 0x80.
 
@@ -228,23 +228,23 @@ void OnPress( int key )
     An LED is blinked when data (keyboard or mouse) is sent to the CMI.
  */
 
-#define ACT_LED         R_LED
+#define ACT_LED               R_LED
 
-int loopcnt;                              // # of passes thru loop() before turning the LED back on
-char last_cmi_key;                        // set to the last key char we sent, cleared on key up, used for typematic
-bool key_repeating = false;               // if true, we are repeating
+int loopcnt;                                // # of passes thru loop() before turning the LED back on
+char last_cmi_key;                          // set to the last key char we sent, cleared on key up, used for typematic
+bool key_repeating = false;                 // if true, we are repeating
 
-#define DELAY_UNTIL_REPEAT    350         // typematic (auto repeat) millisecond delay until repeat
-#define REPEAT_TIME           100         // milliseconds between repeat chars
+#define DELAY_UNTIL_REPEAT    350           // typematic (auto repeat) millisecond delay until repeat
+#define REPEAT_TIME           100           // milliseconds between repeat chars
 
 #include <elapsedMillis.h>
-elapsedMillis keyTimeElapsed;             // measure elapsed time for key autorepeat (typematic)
+elapsedMillis keyTimeElapsed;               // measure elapsed time for key autorepeat (typematic)
 
 bool is_series_3() {
   return ( digitalRead( MODE_SEL ) ? true : false );
 }
 
-void send_cmi_char( char c ) {            // send a char that we want to flicker the LED for
+void send_cmi_char( char c ) {              // send a char that we want to flicker the LED for
     digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
     loopcnt = 10000;  
 
@@ -257,14 +257,14 @@ void send_cmi_char( char c ) {            // send a char that we want to flicker
 
 
 bool repeating_cmi_key( char c ) {
-  if( isprint( c ) || (c == 0x7f) )       // printable char OR rub out / backspace
+  if( isprint( c ) || (c == 0x7f) )         // printable char OR rub out / backspace
     return true;
   else
     return false;
 }
 
 void clear_cmi_key() {
-  last_cmi_key = 0;                       // reset typematic state
+  last_cmi_key = 0;                         // reset typematic state
   key_repeating = false;
 }
 
@@ -282,11 +282,11 @@ void send_cmi_key( char c ) {
 #define MAX_GPAD_X    0x3ff
 #define MAX_GPAD_Y    0x3ff
 
-short     gpad_x;                         // G-Pad (Series III) cursor position
+short     gpad_x;                           // G-Pad (Series III) cursor position
 short     gpad_y;
 
-short     last_gpad_x;                    // previous G-Pad (Series III) cursor position
-short     last_gpad_y;                    //  (used to prevent re-sending same position over & over)
+short     last_gpad_x;                      // previous G-Pad (Series III) cursor position
+short     last_gpad_y;                      //  (used to prevent re-sending same position over & over)
 
 bool      show_cursor_gpad = true;
   
@@ -332,7 +332,7 @@ void init_gpad() {
   last_gpad_x = gpad_x = (MAX_GPAD_X / 2);
   last_gpad_y = gpad_y = (MAX_GPAD_Y / 2);
 
-  Send_GPad_Packet();     // get cursor on-screen and centered
+  Send_GPad_Packet();                       // get cursor on-screen and centered
 }
 
 
@@ -345,7 +345,7 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
   else if (gpad_x > MAX_GPAD_X)
     gpad_x = MAX_GPAD_X;
   
-  gpad_y -= dy;                       // G-Pad Y axis is reversed
+  gpad_y -= dy;                             // G-Pad Y axis is reversed
 
   if (gpad_y < 0)
     gpad_y = 0;
@@ -374,7 +374,7 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
     ----------
 
     Lowest note on master KB is F0.
-    16 velocity values, from 0xF0 (fastest) to 0xFF (fastest)
+    16 velocity values, from 0xF0 (fastest) to 0xFF (slowest)
 
     F0            Note on: 0xC1 0x80  vel     /       Note off: 0xC0 0x80 0x80
     F#0                    0xC1 0x81  vel     /                 0xC0 0x81 0x80
@@ -391,13 +391,15 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
     - channelizer for SIII
  */
 
-#define CMI_F0_NOTE_VAL         0x80                // F0 on master keyboard
+#define CMI_F0_NOTE_VAL         0x80                                        // note F0 on master keyboard
 #define MIDI_F0_NOTE_VAL        0x11
 #define CMI_NOTE_DIFF           ( CMI_F0_NOTE_VAL - MIDI_F0_NOTE_VAL )
 
-#define CMI_MIDI_CHANNEL        1
 
 void send_cmi_music_kb( uint8_t c ) {
+  digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
+  loopcnt = 10000;  
+  
   CMI_SERIAL.write( c );
 
   //Serial.print("M: ");
@@ -405,8 +407,36 @@ void send_cmi_music_kb( uint8_t c ) {
 }
 
 
+void send_cmi_control_slider_val( char cc, char val ) {
+  send_cmi_music_kb( 0xD5 );  
+  switch( cc ) {
+    case 0x00:  send_cmi_music_kb( 0x80 );      break;            
+    case 0x01:  send_cmi_music_kb( 0x81 );      break;
+    case 0x02:  send_cmi_music_kb( 0x82 );      break;
+    case 0x03:  send_cmi_music_kb( 0x83 );      break;
+    case 0x04:  send_cmi_music_kb( 0x84 );      break;
+    case 0x05:  send_cmi_music_kb( 0x85 );      break;
+  }
+  send_cmi_music_kb( map( val, 0x00, 0x7F, 0x80, 0xFF ) );
+}
+
+
+              
+void send_cmi_control_switch_val( char cc, char val ) {
+  send_cmi_music_kb( 0xD3 ); 
+  switch( cc ) {
+    case 0x00:  send_cmi_music_kb( 0x80 );      break;    
+    case 0x01:  send_cmi_music_kb( 0x81 );      break;      
+    case 0x02:  send_cmi_music_kb( 0x82 );      break;
+    case 0x03:  send_cmi_music_kb( 0x83 );      break;
+    case 0x04:  send_cmi_music_kb( 0x84 );      break;
+  }
+  send_cmi_music_kb( (val<64) ? 0x80 : 0xff );
+}
+
+
 void handle_midi() {
-  if( is_series_3() ) {                             // SIII just takes MIDI from music kb
+  if( is_series_3() ) {                                                     // SIII just takes MIDI from music kb
     if( MIDI_SERIAL.available() )
       MIDI_SERIAL.write( MIDI_SERIAL.read() );
   }
@@ -414,11 +444,11 @@ void handle_midi() {
     int note, velocity, channel;
     byte type;
     
-    if (MIDI.read()) {                                                    // Is there a MIDI message incoming ?
+    if (MIDI.read()) {                                                      // Is there a MIDI message incoming ?
       type = MIDI.getType();
       channel = MIDI.getChannel();
 
-      if( channel == CMI_MIDI_CHANNEL ) {
+      if( channel == MIDI_CHANNEL ) {
         switch (type) {
           
           case midi::NoteOn:
@@ -446,28 +476,37 @@ void handle_midi() {
             note = MIDI.getData1();
             velocity = MIDI.getData2();
       
-            //Serial.println(String("Note Off: ch=") + channel + ", note=" + note + ", velocity=" + velocity);
-  
             send_cmi_music_kb( 0xC0 );                                       // note off
             send_cmi_music_kb( note + CMI_NOTE_DIFF );                       // convert MIDI note to CMI note
             send_cmi_music_kb( 0x80 );                                       // always sent on note off
-
             break;
   
           case midi::PitchBend:  
-
-            send_cmi_music_kb( 0xD5 );
-            send_cmi_music_kb( 0x80 );
-            send_cmi_music_kb( map( MIDI.getData2(), 0x00, 0x7F, 0x80, 0xFF ) );
-            
-            //Serial.print("CC: ");
-            //Serial.print( MIDI.getData1(), HEX );
-            //Serial.print(" ");
-            //Serial.println( MIDI.getData2(), HEX );
-            
+            send_cmi_control_slider_val( 0x00, MIDI.getData2() );                               // Pitchbend -> Control Slider 1
             break;
 
-   
+          case midi::ControlChange:  
+            switch( MIDI.getData1() ) {                                                         // which CC?
+              
+              // remaining 5 CMI Control slider inputs are mapped to MIDI CC #75-79 (Generic "Sound Controller #6 - 10)
+              
+              case 75:  send_cmi_control_slider_val( 0x01, MIDI.getData2() );   break;
+              case 76:  send_cmi_control_slider_val( 0x02, MIDI.getData2() );   break;
+              case 77:  send_cmi_control_slider_val( 0x03, MIDI.getData2() );   break;
+              case 78:  send_cmi_control_slider_val( 0x04, MIDI.getData2() );   break;
+              case 79:  send_cmi_control_slider_val( 0x05, MIDI.getData2() );   break;                
+
+              // first 4 of 5 CMI Switch inputs are mapped to MIDI CC #80 - 83 (Generic On/Off Switch, val 0-63 = OFF, 64-127 = ON)
+              //         last CMI Switch input is mapped to   MIDI CC #16 (General Purpose, we adopt the convention of val = 0-63 = OFF< 64-127 = ON)
+
+              case 80:  send_cmi_control_switch_val( 0x00, MIDI.getData2() );   break;
+              case 81:  send_cmi_control_switch_val( 0x01, MIDI.getData2() );   break;
+              case 82:  send_cmi_control_switch_val( 0x02, MIDI.getData2() );   break;
+              case 83:  send_cmi_control_switch_val( 0x03, MIDI.getData2() );   break;
+              case 16:  send_cmi_control_switch_val( 0x04, MIDI.getData2() );   break;
+            }
+          break;
+          
           default:  
 
             Serial.print("DEF: ");
@@ -499,14 +538,14 @@ void setup()
   pinMode( R_LED, OUTPUT );
   digitalWrite( R_LED, true );
 
-  pinMode( G_LED, OUTPUT );                 // power on
+  pinMode( G_LED, OUTPUT );                             // power on
   digitalWrite( G_LED, false );
   
   // ===============================
   // Set up console (debug) serial
     
   Serial.begin( 115200 );
-  delay( 1500 );                            // wait for serial, but don't block if it's not connected
+  delay( 1500 );                                        // wait for serial, but don't block if it's not connected
   Serial.println("Welcome to USB Keyboard & Mouse adapter for CMI");
 
   Serial.print("Series ");
@@ -522,13 +561,13 @@ void setup()
   
   led_display_string((char*)"VERSION 1.0 ");
   delay( 1000 );
-  led_display_string((char*)"  POWER ON  ");
+  led_display_string((char*)" -POWER ON- ");
 
   // ===============================
   // Set up CMI comms
   
-  CMI_SERIAL.begin( 9600 );       // init output port   
-  KEYBD_SERIAL.begin( 9600 );     // init legacy keyboard port   
+  CMI_SERIAL.begin( 9600 );                             // init output port   
+  KEYBD_SERIAL.begin( 9600 );                           // init legacy keyboard port   
 
   init_gpad();
 
@@ -571,14 +610,16 @@ void loop()
 
   if( CMI_SERIAL.available() ) {
     char c = CMI_SERIAL.read();
+
+    /*
     Serial.print( "LED: ");
     Serial.print( c );
     Serial.print( " " );
     Serial.println( c, HEX );
-
-    KEYBD_SERIAL.write( c );
-    delay(1);                             // XXX hack -- without this, legacy music kb led display sometimes shows same char in pos 1 & 2
-    putc_led_display( c );
+    */
+    
+    putc_led_display( c );                              // XXX -- something timing sensitive here. if i send to the keyboard first,
+    KEYBD_SERIAL.write( c );                            //        the second char on the legacy LED display is incorrect.
   }
 
   // ===============================
@@ -588,8 +629,8 @@ void loop()
     char c = KEYBD_SERIAL.read();
     CMI_SERIAL.write( c );
 
-    Serial.print("K: ");                                      // for figuring out what the music KB sends
-    Serial.println(c, HEX);
+    //Serial.print("K: ");                                      // for figuring out what the music KB sends
+    //Serial.println(c, HEX);
   }
   
   // ===============================
@@ -689,6 +730,7 @@ void loop()
 }
 
 
+
 /* ---------------------------------------------------------------------------------------
     Alphanumeric LED Displays
  */
@@ -771,7 +813,7 @@ void exp_wr( uchar addr, uchar val ) {
   err = Wire1.endTransmission();
 
   if( err != 0 ) {
-    no_expander_found = true;         // bummer, we don't seem to have the i2c expander
+    no_expander_found = true;           // bummer, we don't seem to have the i2c expander
   }
 }
 
@@ -789,9 +831,9 @@ uchar exp_rd( uchar addr ) {
 }
 
 void init_led_display_exp() {  
-  pinMode( IO_EXP_RST, OUTPUT );      // hard reset the part
+  pinMode( IO_EXP_RST, OUTPUT );        // hard reset the part
   digitalWrite( IO_EXP_RST, 0 );  
-  delay( 2 );                         // let it out of reset
+  delay( 2 );                           // let it out of reset
   digitalWrite( IO_EXP_RST, 1 );
   
   // crank up i2c
@@ -811,7 +853,7 @@ void init_led_display_exp() {
     Serial.println(" LED/Keypad found, right on! ");
   }
   else {
-    Serial.println(" -->No LED/Keypad found, bummer! ");
+    Serial.println(" No LED/Keypad found, bummer! ");
   }
 }
 
@@ -859,17 +901,6 @@ char led_data_swizzle( char c ) {
     Col 1 -> i2c GPB0
     Col 2 -> exp pin 5 (digital pin 7)
     Col 3 -> exp pin 8 (digital pin 11)
-
-    To scan:
-
-    >>> Put this after potential LED update in loop()
-
-    0. initialize drive_count_loops = 0
-    1. Drive current row low, others high (LED data)
-    2. drive_count_loops++;
-    3. drive_count_loops >= 3?
-       YES -> sample columns, XOR to see what changed, send char on key downs
-
 */
 
 #define ROW_0_LOW     0b10111111      // GPA6
@@ -887,10 +918,10 @@ char matrix_last[4];                  // last state, use xor to figure out if an
 
 // key map tables, [row][col]
 
-char keymap[4][4] = { { '1', '4', '7', '*' },
-                      { '2', '5', '8', '0' },
-                      { '3', '6', '9', '#' },
-                      { 'A', 'B', 'C', 'D' } };
+char keymap[4][4] = { { '1', '4', '7', 0x05 },          // '*' sends 0x05
+                      { '2', '5', '8', '0'  },
+                      { '3', '6', '9', 0x06 },          // '#' sends 0x06
+                      { 'A', 'B', 'C', 'D'  } };
 
 
 // drive one row low. -1 = all high.
@@ -905,7 +936,7 @@ void drive_row( int r ) {
   }
 }
 
-// return true (read a 0) or false (read a 1)
+// return true (read a 1) or false (read a 0)
 
 bool read_col( int c ) {
   bool r = false;
@@ -996,8 +1027,8 @@ int scan_row;                                     // row currently driving low
 
 
 void keypad_send( char c ) {                      // send keypad keypresses to CMI
-  Serial.print("keypad: ");
-  Serial.println( c );
+  //Serial.print("keypad: ");
+  //Serial.println( c, HEX );
   send_cmi_char( c );                             // no autorepeat, handle flickering status LED
 }
 
@@ -1067,7 +1098,7 @@ void put_led_char( int pos, char c ) {
     
   reset_keypad_scan();                      // make sure the keypad scanner doesn't get in our way
   
-  pos ^= 0x03;
+  pos ^= 0x03;                              // invert address lines to LED displays, our sense of chars 0->3 is reversed
   
   // ---------------------------
   // Set up the data bus
