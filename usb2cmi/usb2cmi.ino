@@ -30,17 +30,19 @@
     Hardware Specifics
  */
  
-#define CMI_SERIAL      Serial1           // to/from CMI
-#define KEYBD_SERIAL    Serial2           // to/from legacy keyboard
+#define CMI_SERIAL          Serial1           // to/from CMI
+#define KEYBD_SERIAL        Serial2           // to/from legacy keyboard
 
-#define EXP_SERIAL      Serial3
+#define EXP_SERIAL          Serial3
 
-#define MIDI_SERIAL     Serial4
+#define MIDI_SERIAL         Serial4
 
-#define MODE_SEL        22                // input selects Series I/II/IIX or III mode
+#define CMI_MIDI_KB_SERIAL  Serial5           // MIDI in from legacy CMI music keyboard
 
-#define R_LED           16                // activity LED
-#define G_LED           17
+#define MODE_SEL            22                // input selects Series I/II/IIX or III mode
+
+#define R_LED               16                // activity LED
+#define G_LED               17
 
 /* ---------------------------------------------------------------------------------------
     DL1416-style display
@@ -74,6 +76,8 @@ MIDI_CREATE_INSTANCE(HardwareSerial, MIDI_SERIAL, MIDI);
 const int midi_chan = 1;
 
 #define MIDI_CHANNEL    midi_chan
+
+//MIDI_CREATE_INSTANCE(HardwareSerial, CMI_MIDI_KB_SERIAL, MIDI_CMI_KB);
 
 
 /* ---------------------------------------------------------------------------------------
@@ -436,9 +440,22 @@ void send_cmi_control_switch_val( char cc, char val ) {
 
 
 void handle_midi() {
+  char c;
+  
   if( is_series_3() ) {                                                     // SIII just takes MIDI from music kb
-    if( MIDI_SERIAL.available() )
-      MIDI_SERIAL.write( MIDI_SERIAL.read() );
+    if( MIDI_SERIAL.available() ) {                                         // XXX TODO: Merge for SIII!
+      c = MIDI_SERIAL.read();
+      //Serial.println( c, HEX );
+      //MIDI_SERIAL.write( MIDI_SERIAL.read() );
+      MIDI_SERIAL.write( c );
+    }
+    
+    if( CMI_MIDI_KB_SERIAL.available() ) {
+      c = CMI_MIDI_KB_SERIAL.read();
+      //Serial.println( c, HEX );
+      //MIDI_SERIAL.write( MIDI_SERIAL.read() );
+      MIDI_SERIAL.write( c );
+    }
   }
   else {
     int note, velocity, channel;
@@ -559,9 +576,12 @@ void setup()
   
   init_led_display_exp();
   
-  led_display_string((char*)"VERSION 1.0 ");
+  led_display_string((char*)"VERSION 1.1 ");
   delay( 1000 );
-  led_display_string((char*)" -POWER ON- ");
+  if( is_series_3() )
+    led_display_string((char*)" SERIES III ");
+  else
+    led_display_string((char*)" -POWER ON- ");
 
   // ===============================
   // Set up CMI comms
@@ -587,6 +607,9 @@ void setup()
   
   MIDI.begin( MIDI_CHANNEL );
   MIDI_SERIAL.begin( 31250, SERIAL_8N1_TXINV );         // our hardware is inverted on the transmit side only!
+
+  //MIDI_CMI_KB.begin( MIDI_CHANNEL );
+  CMI_MIDI_KB_SERIAL.begin( 31250 );
 
   // ===============================
   // Set up keypad I/Os
