@@ -25,6 +25,8 @@
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
  */
 
+#define   FIRMWARE_VERSION          2
+#define   FIRMWARE_VERSION_TEXT     "VERSION 1.2 "
 
 /* ---------------------------------------------------------------------------------------
     Hardware Specifics
@@ -58,11 +60,34 @@
 
 #define IO_EXP_ADDR     0x20  // all 3 external addr lines tied low
 
-void init_led_display_exp();
+bool init_led_display_exp();
 
 void blank_led_display();
 void putc_led_display( char c );
 void led_display_string( char *s );
+
+/* ---------------------------------------------------------------------------------------
+    Control Red & Green LEDs on toggle switch
+ */
+ 
+void led_green( bool led_on ) {
+  digitalWrite( G_LED, led_on ? false : true );
+}
+
+void led_red( bool led_on ) {
+  digitalWrite( R_LED, led_on ? false : true );
+}
+
+void led_blink_version( char vers ) {
+  led_green( 0 );                             // power LED off
+
+  for( int xxx = 0; xxx != vers; xxx++ ) {    // version shown as # of red blinks
+    led_red( 1 );
+    delay( 250 );
+    led_red( 0 );
+    delay( 350 );
+  }
+}
 
 
 /* ---------------------------------------------------------------------------------------
@@ -553,16 +578,20 @@ void setup()
   pinMode( MODE_SEL, INPUT_PULLUP );
   
   pinMode( R_LED, OUTPUT );
-  digitalWrite( R_LED, true );
+  pinMode( G_LED, OUTPUT );
 
-  pinMode( G_LED, OUTPUT );                             // power on
-  digitalWrite( G_LED, false );
+  led_red( 0 );
+  led_green ( 1 );              // power on!
+
+  Serial.begin( 115200 );       // go ahead and do this, we'll take advantage of the delays for the LED version blink
+
+  delay( 500 );
+  led_blink_version( FIRMWARE_VERSION );
   
   // ===============================
   // Set up console (debug) serial
     
-  Serial.begin( 115200 );
-  delay( 1500 );                                        // wait for serial, but don't block if it's not connected
+  delay( 250 );                                         // wait for serial, but don't block if it's not connected
   Serial.println("Welcome to USB Keyboard & Mouse adapter for CMI");
 
   Serial.print("Series ");
@@ -574,15 +603,18 @@ void setup()
   // ===============================
   // Set up alphanumeric LED display
   
-  init_led_display_exp();
-  
-  led_display_string((char*)"VERSION 1.1 ");
-  delay( 1000 );
-  if( is_series_3() )
-    led_display_string((char*)" SERIES III ");
-  else
-    led_display_string((char*)" -POWER ON- ");
+  if( init_led_display_exp() ) {
+    led_display_string((char*)FIRMWARE_VERSION_TEXT);
+    delay( 800 );
+    
+    if( is_series_3() )
+      led_display_string((char*)" SERIES III ");
+    else
+      led_display_string((char*)" -POWER ON- ");
+  }
 
+  led_green( 1 );                                       // back to green (power on)
+  
   // ===============================
   // Set up CMI comms
   
@@ -608,7 +640,7 @@ void setup()
   MIDI.begin( MIDI_CHANNEL );
   MIDI_SERIAL.begin( 31250, SERIAL_8N1_TXINV );         // our hardware is inverted on the transmit side only!
 
-  //MIDI_CMI_KB.begin( MIDI_CHANNEL );
+  //CMI_MIDI_KB_SERIAL.begin( MIDI_CHANNEL );
   CMI_MIDI_KB_SERIAL.begin( 31250 );
 
   // ===============================
@@ -853,7 +885,7 @@ uchar exp_rd( uchar addr ) {
   return r;
 }
 
-void init_led_display_exp() {  
+bool init_led_display_exp() {  
   pinMode( IO_EXP_RST, OUTPUT );        // hard reset the part
   digitalWrite( IO_EXP_RST, 0 );  
   delay( 2 );                           // let it out of reset
@@ -878,6 +910,8 @@ void init_led_display_exp() {
   else {
     Serial.println(" No LED/Keypad found, bummer! ");
   }
+
+  return( !no_expander_found );         // did we find one?
 }
 
 /*  Take in a byte in normal bit order, return a byte with data bits swizzled as hardware is connected.
