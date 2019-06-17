@@ -23,17 +23,20 @@
     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
+
+    2/3/19  v1.3    Added support for HDSP-21xx displays, made i2c probe more robust
+    
  */
 
-#define   FIRMWARE_VERSION          2
-#define   FIRMWARE_VERSION_TEXT     "VERSION 1.2 "
+#define   FIRMWARE_VERSION          3
+#define   FIRMWARE_VERSION_TEXT     "VERSION 1.3 "
 
 /* ---------------------------------------------------------------------------------------
     Hardware Specifics
  */
  
 #define CMI_SERIAL          Serial1           // to/from CMI
-#define KEYBD_SERIAL        Serial2           // to/from legacy keyboard
+#define KEYBD_SERIAL        Serial5           // to/from legacy keyboard
 
 #define EXP_SERIAL          Serial3
 
@@ -47,20 +50,13 @@
 #define G_LED               17
 
 /* ---------------------------------------------------------------------------------------
-    DL1416-style display
-    Connected via 23017 i2c port expander
+    LED display support
+    Multiple display types are supported.
+    Which (if any) is connected is detected at boot.
+    These general purpose routines handle detection of and writing characters to the display.
  */
 
-#include <i2c_t3.h>
-
-#define IO_EXP_RST      12    // pull low to reset, wait, then let high
-
-#define I2C_SDA_PIN     38    // SDA1 / SCL1
-#define I2C_SCL_PIN     37
-
-#define IO_EXP_ADDR     0x20  // all 3 external addr lines tied low
-
-bool init_led_display_exp();
+bool init_led_display();
 
 void blank_led_display();
 void putc_led_display( char c );
@@ -279,9 +275,12 @@ void send_cmi_char( char c ) {              // send a char that we want to flick
 
     if( !is_series_3() )                    // CMI just expects ASCII, no key-ups. Only send lower case to SIII
       c = toupper( c );
-  
+
+    Serial.print("fuck" );
+    Serial.println(c);        // not here
+      
     DEBUG_HEX( c );
-    CMI_SERIAL.write( c );    
+    CMI_SERIAL.write( c );
 }
 
 
@@ -430,7 +429,7 @@ void send_cmi_music_kb( uint8_t c ) {
   loopcnt = 10000;  
   
   CMI_SERIAL.write( c );
-
+    
   //Serial.print("M: ");
   //Serial.println( c, HEX );
 }
@@ -603,7 +602,7 @@ void setup()
   // ===============================
   // Set up alphanumeric LED display
   
-  if( init_led_display_exp() ) {
+  if( init_led_display() ) {
     led_display_string((char*)FIRMWARE_VERSION_TEXT);
     delay( 800 );
     
@@ -627,10 +626,14 @@ void setup()
   // Set up USB
   
   myusb.begin();
+
+  delay( 100 );
   
   keyboard1.attachPress(OnPress);
   keyboard1.attachRelease(OnRelease);
 
+  delay ( 100 );
+  
   keyboard2.attachPress(OnPress);
   keyboard2.attachRelease(OnRelease);
 
@@ -672,7 +675,7 @@ void loop()
     Serial.print( " " );
     Serial.println( c, HEX );
     */
-    
+        
     putc_led_display( c );                              // XXX -- something timing sensitive here. if i send to the keyboard first,
     KEYBD_SERIAL.write( c );                            //        the second char on the legacy LED display is incorrect.
   }
@@ -787,8 +790,23 @@ void loop()
 
 
 /* ---------------------------------------------------------------------------------------
-    Alphanumeric LED Displays
+    DL1416-style display
+    Connected via 23017 i2c port expander
  */
+
+#include <i2c_t3.h>
+
+#define IO_EXP_RST      12    // pull low to reset, wait, then let high
+
+#define I2C_SDA_PIN     38    // SDA1 / SCL1
+#define I2C_SCL_PIN     37
+
+#define IO_EXP_ADDR     0x20  // all 3 external addr lines tied low
+
+// ------------- standard output routines
+
+bool init_led_display_DL1416();
+void put_led_char_DL1416( int pos, char c );
 
 /*
   23017 i2c port expander -> DL1416 LED display pin mapping
@@ -824,7 +842,7 @@ typedef unsigned char uchar;
 void exp_wr( uchar addr, uchar val );
 uchar exp_rd( uchar addr );
 
-bool no_expander_found = false;   // used to bypass i2c operations if we don't find the port expander at boot
+bool expander_found = false;      // used to bypass i2c operations if we don't find the port expander at boot
 
 #define IODIRA          0x00      // IO Direction (1 = input, 0xff on reset)
 #define IODIRB          0x01
@@ -867,8 +885,8 @@ void exp_wr( uchar addr, uchar val ) {
   Wire1.write( val );
   err = Wire1.endTransmission();
 
-  if( err != 0 ) {
-    no_expander_found = true;           // bummer, we don't seem to have the i2c expander
+  if( err == 0 ) {
+    expander_found = true;        // excellent, we have the i2c expander!
   }
 }
 
@@ -883,35 +901,6 @@ uchar exp_rd( uchar addr ) {
   r = Wire1.read();
   
   return r;
-}
-
-bool init_led_display_exp() {  
-  pinMode( IO_EXP_RST, OUTPUT );        // hard reset the part
-  digitalWrite( IO_EXP_RST, 0 );  
-  delay( 2 );                           // let it out of reset
-  digitalWrite( IO_EXP_RST, 1 );
-  
-  // crank up i2c
-  Wire1.begin();
-  Wire1.setOpMode(I2C_OP_MODE_IMM);
-
-  Serial.print("initializing port expander...");  
-  
-  exp_wr( OLATA,    0xff );             // LED pins hi, and also probe for the i2c expander
-  
-  if( no_expander_found == false ) {    // do we have one?
-    exp_wr( IODIRA,   0x00 );           // all port A pins OUTPUTS
-  
-    exp_wr( OLATB,    0xff );
-    exp_wr( IODIRB,   0x03 );           // port B[7:3] are OUTPUTS, B[1:0] are INPUTS
-
-    Serial.println(" LED/Keypad found, right on! ");
-  }
-  else {
-    Serial.println(" No LED/Keypad found, bummer! ");
-  }
-
-  return( !no_expander_found );         // did we find one?
 }
 
 /*  Take in a byte in normal bit order, return a byte with data bits swizzled as hardware is connected.
@@ -1024,7 +1013,7 @@ void keypad_col_pullups_enable( bool en ) {
 
 void init_keypad() {
   
-  if( no_expander_found )              // don't try to init if no expander fitted
+  if( expander_found == false )        // don't try to init if no expander fitted
     return;
       
   Serial.print("initializing keypad...");
@@ -1097,7 +1086,7 @@ bool went_down( int row, char mask ) {
 
 void scan_keypad() {
   
-  if( no_expander_found )                                                                       // don't try to scan if no expander fitted
+  if( expander_found == false )                                                                 // don't try to scan if no expander fitted
     return;
   
   switch( keyscan_state ) {
@@ -1144,13 +1133,52 @@ void reset_keypad_scan() {
 }
 
 
+// ------------- standard output routines
 
-void put_led_char( int pos, char c ) {
+bool init_led_display_DL1416() {  
+  pinMode( IO_EXP_RST, OUTPUT );            // hard reset the part
+  digitalWrite( IO_EXP_RST, 0 );  
+  delay( 2 );                               // let it out of reset
+  digitalWrite( IO_EXP_RST, 1 );
+  
+  // crank up i2c
+  
+  pinMode( I2C_SDA_PIN, OUTPUT );           // first drive both lines low
+  pinMode( I2C_SCL_PIN, OUTPUT );           // this seems to make probe work better when nothing is connected
+  digitalWrite( I2C_SDA_PIN, LOW );
+  digitalWrite( I2C_SCL_PIN, LOW );
+  
+  Wire1.begin();
+  Wire1.setOpMode(I2C_OP_MODE_IMM);
+  Wire1.resetBus();
+
+  Serial.print("initializing port expander...");  
+  
+  exp_wr( OLATA,    0xff );                 // LED pins hi, and also probe for the i2c expander
+
+  Serial.println("back");
+  
+  if( expander_found == true ) {            // do we have one?
+    exp_wr( IODIRA,   0x00 );               // all port A pins OUTPUTS
+  
+    exp_wr( OLATB,    0xff );
+    exp_wr( IODIRB,   0x03 );               // port B[7:3] are OUTPUTS, B[1:0] are INPUTS
+
+    Serial.println(" LED/Keypad found, right on! ");
+  }
+  else {
+    Serial.println(" No LED/Keypad found, bummer! ");
+  }
+
+  return( expander_found );                 // did we find one?
+}
+
+void put_led_char_DL1416( int pos, char c ) {
   uchar portA;
   uchar portB;
   uchar portB_CS_sel;
 
-  if( no_expander_found )                   // don't try to talk to LED displayes if no expander fitted
+  if( expander_found == false )             // don't try to talk to LED displayes if no expander fitted
     return;
     
   reset_keypad_scan();                      // make sure the keypad scanner doesn't get in our way
@@ -1193,14 +1221,210 @@ void put_led_char( int pos, char c ) {
 }
 
 
+
+/* ---------------------------------------------------------------------------------------
+    HDSP-21xx-style display
+    Connected via GPIOs, all driven from Teensy -> display, so no 5V tolerance issues.
+
+    Display is a long shift register.
+    Character data from font in sketch (font5x7.h) is loaded to display desired characters.
+    
+ */
+
+#include "font5x7.h"                           // font definition
+
+// Pins used for the LED display
+
+#define HDSP_LED_DATA                    8     // connects to the display's data in
+#define HDSP_LED_REGSEL                 11     // the display's register select pin 
+#define HDSP_LED_CLK                    12     // the display's clock pin
+#define HDSP_LED_ENABLE                 37     // the display's chip enable pin
+#define HDSP_LED_RST                    38     // the display's reset pin        \ tied together
+#define HDSP_LED_DETECT_LOOPBACK         7     //                                /   if fitted
+
+#define LED_CHARLEN                     16     // number of characters in the display
+
+void hdsp_init();                                           // init an 8-digit HDSP LED display
+void hdsp_putchar( int pos, char c );                       // display ASCII char c at pos, call hdsp_flush when ready to send to display
+void hdsp_flush();                                          // copy hdsp_bitmap to the display
+
+void hdsp_set_brightness( char b );                         // 0 (off) -> 15 (brightest)
+
+void hdsp_write_ctl( int reg, char val );                   // write to one of the two HDSP control regs
+
+char hdsp_buf[LED_CHARLEN];                                 // ASCII values on display
+char hdsp_bitmap[LED_CHARLEN*5];                            // each digit is 5 bytes
+
+bool hdsp_found = false;                                    // assume we don't have it fitted
+
+// ------------- standard output routines
+
+bool init_led_display_HDSP21XX();                           // probe for display, return true if found
+void put_led_char_HDSP21XX( int pos, char c );              // put a char on the display
+
+
+void hdsp_init() {  
+  // init i/o pins
+  pinMode( HDSP_LED_DATA,    OUTPUT );
+  pinMode( HDSP_LED_REGSEL,  OUTPUT );
+  pinMode( HDSP_LED_CLK,     OUTPUT );
+  pinMode( HDSP_LED_ENABLE,  OUTPUT );
+  pinMode( HDSP_LED_RST,     OUTPUT );
+
+  // reset the display
+  digitalWrite( HDSP_LED_RST, LOW );
+  delay( 10 );
+  digitalWrite( HDSP_LED_RST, HIGH );
+
+  hdsp_flush();                                             // init dot reg, all 0 (blank display)
+
+  hdsp_write_ctl( 1, 0x01 );                                // word 1: OSC freq 1, Dout holds D7
+  hdsp_write_ctl( 0, 0x7f );                                // word 0: no sleep, max current, max brightness
+}
+
+void hdsp_putchar( int pos, char c ) {
+  int bm_pos;
+  
+  bm_pos = (pos * 5);                                       // each char is 5 bytes, index to the first for this char
+  hdsp_buf[pos] = c;                                        // ASCII shadows
+
+  for( int x = 0; x != 5; x++ )
+    hdsp_bitmap[bm_pos+x] = pgm_read_byte(&Font5x7[((c-0x20)*5)+x]);
+
+  hdsp_flush();
+}
+
+
+void hdsp_flush() {
+  digitalWrite( HDSP_LED_REGSEL, LOW );                     // RS = 0 -> dot reg
+  digitalWrite( HDSP_LED_ENABLE, LOW );                     // drop CS
+
+  for( int x = 0; x < (LED_CHARLEN*5); x++ )
+    shiftOut( HDSP_LED_DATA, HDSP_LED_CLK, MSBFIRST, hdsp_bitmap[x] );
+
+  digitalWrite( HDSP_LED_ENABLE, HIGH );                    // done
+}
+
+
+void hdsp_set_brightness( char b ) {
+  hdsp_write_ctl( 0, (0x70+b) );                            // brightness 0-15, in low nybble 
+}
+
+
+/*
+ *  The display has 2 independent 7-bit control registers.
+ *  Bit 7 in the written value selects one of the 2 words.
+ *  
+ *  Control word 0 (b7 = 0) controls PWM brightness, peak pixel current, and sleep mode
+ *  Control work 1 (b7 = 1) controls serial in/out mode and ext osc prescaler
+ */
+void hdsp_write_ctl( int reg, char val ) {
+  if(reg)
+    val |= 0x80;                                            // register word 0/1 select is b7
+  
+  digitalWrite( HDSP_LED_REGSEL, HIGH );                    // RS = 1 -> ctl regs
+  digitalWrite( HDSP_LED_ENABLE, LOW );                     // drop CS
+  shiftOut( HDSP_LED_DATA, HDSP_LED_CLK, MSBFIRST, val );   // shift out the bits
+  shiftOut( HDSP_LED_DATA, HDSP_LED_CLK, MSBFIRST, val );   // shift out the bits again (2 displays)
+  digitalWrite( HDSP_LED_ENABLE, HIGH );                    // done
+}
+
+
+// ------------- standard output routines
+
+bool init_led_display_HDSP21XX() {
+
+  pinMode( HDSP_LED_DETECT_LOOPBACK, INPUT );
+  pinMode( HDSP_LED_RST,             OUTPUT );
+
+  digitalWrite( HDSP_LED_RST, 1 );
+  if( digitalRead( HDSP_LED_DETECT_LOOPBACK ) != 1 ) {      // LOOPBACK following RST?
+    return false;
+  }
+
+  digitalWrite( HDSP_LED_RST, 0 );
+  if( digitalRead( HDSP_LED_DETECT_LOOPBACK ) != 0 ) {      // LOOPBACK following RST?
+    return false;
+  }
+
+  // OK, we are installed!
+
+  hdsp_found = true;
+
+  Serial.println(" HDSP Mini LED display found, good times! ");
+  
+  hdsp_init();                                              // initialize display
+
+  return( true );
+}
+
+void put_led_char_HDSP21XX( int pos, char c ) {
+  if( hdsp_found )
+    hdsp_putchar( pos, c );
+}
+
+
+
+/* ---------------------------------------------------------------------------------------
+    Alphanumeric LED Displays
+
+    2 Display types are currently supported:
+
+    1. 3x DL1416 4-character intelligent LED displays
+       These are the ones used in the CMI music keyboard.
+       These have character ROMs, and only need to be given ASCII character codes.
+
+    2. 2x HDSP-21xx 8-character 5x7 matrix LED displays
+       These are smaller, more modern, and more easily sourced displays.
+       With 2 of them chained together, 16 characters are available, but we only use the middle 12.
+       These displays are just dumb bitmaps, a font is in the font5x7.h file. 
+       This can be edited to customize the character appearance.
+
+    At boot we probe for each, and use one if detected.
+    Detection of the HDSP-21xx displays is done by checking if digital pins 38 and 7 are connected.
+    Detection of the DL1416 displays is done by detecting a successful i2c transaction to the port expander.
+
+    The main code receives characters from the CMI and uses these APIs to control the displays:
+
+          bool init_led_display();
+          void blank_led_display();
+          void led_display_string( char *s );
+
+    Each possible display type implements this API:
+
+          void put_led_char_TYPE( char c );
+
+    Where TYPE is the specific type:
+
+          void put_led_char_DL1416( char c );
+          void put_led_char_HDSP21XX( char c );
+     
+ */
+
 int curpos = 0;
+
+bool init_led_display(){
+
+  if( init_led_display_HDSP21XX() == true )               // Look for the HDSP first, its probe is much faster
+    return true;
+
+  if( init_led_display_DL1416() == true )
+    return true;
+
+  return false;
+}
 
 void putc_led_display( char c ) {
   if( isprint( c ) ) {
     if( curpos == 12 )
       curpos = 0;
 
-    put_led_char( curpos, c );
+    if( hdsp_found )
+      put_led_char_HDSP21XX( curpos+2, c );               // hack to center 12 chars in 16 char display
+
+    if( expander_found )
+      put_led_char_DL1416( curpos, c );
+      
     curpos++;
   } else
     if( (c == 0x0a) || (c == 0x0d) ) {
