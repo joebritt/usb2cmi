@@ -28,15 +28,17 @@
     
  */
 
-#define   FIRMWARE_VERSION          3
-#define   FIRMWARE_VERSION_TEXT     "VERSION 1.3 "
+#define   FIRMWARE_VERSION          4
+#define   FIRMWARE_VERSION_TEXT     "VERSION 1.4 "
+
+#include <elapsedMillis.h>
 
 /* ---------------------------------------------------------------------------------------
     Hardware Specifics
  */
  
 #define CMI_SERIAL          Serial1           // to/from CMI
-#define KEYBD_SERIAL        Serial5           // to/from legacy keyboard
+#define KEYBD_SERIAL        Serial2           // to/from legacy keyboard
 
 #define EXP_SERIAL          Serial3
 
@@ -108,11 +110,115 @@ const int midi_chan = 1;
  
 #include "USBHost_t36.h"
 
+
+class KeyboardControllerExt : public USBDriver , public USBHIDInput, public BTHIDInput {
+public:
+typedef union {
+   struct {
+        uint8_t numLock : 1;
+        uint8_t capsLock : 1;
+        uint8_t scrollLock : 1;
+        uint8_t compose : 1;
+        uint8_t kana : 1;
+        uint8_t reserved : 3;
+        };
+    uint8_t byte;
+} KBDLeds_t;
+public:
+  KeyboardControllerExt(USBHost &host) { init(); }
+  KeyboardControllerExt(USBHost *host) { init(); }
+
+  // need their own versions as both USBDriver and USBHIDInput provide
+  uint16_t idVendor();
+  uint16_t idProduct();
+  const uint8_t *manufacturer();
+  const uint8_t *product();
+  const uint8_t *serialNumber();
+
+  operator bool() { return ((device != nullptr) || (btdevice != nullptr)); }
+  // Main boot keyboard functions. 
+  uint16_t getKey() { return keyCode; }
+  uint8_t  getModifiers() { return modifiers; }
+  uint8_t  getOemKey() { return keyOEM; }
+  void     attachPress(void (*f)(int unicode)) { keyPressedFunction = f; }
+  void     attachRelease(void (*f)(int unicode)) { keyReleasedFunction = f; }
+  void     LEDS(uint8_t leds);
+  uint8_t  LEDS() {return leds_.byte;}
+  void     updateLEDS(void);
+  bool     numLock() {return leds_.numLock;}
+  bool     capsLock() {return leds_.capsLock;}
+  bool     scrollLock() {return leds_.scrollLock;}
+  void   numLock(bool f);
+  void     capsLock(bool f);
+  void   scrollLock(bool f);
+
+  // Added for extras information.
+  void     attachExtrasPress(void (*f)(uint32_t top, uint16_t code)) { extrasKeyPressedFunction = f; }
+  void     attachExtrasRelease(void (*f)(uint32_t top, uint16_t code)) { extrasKeyReleasedFunction = f; }
+  void   forceBootProtocol();
+  enum {MAX_KEYS_DOWN=4};
+
+
+protected:
+  virtual bool claim(Device_t *device, int type, const uint8_t *descriptors, uint32_t len);
+  virtual void control(const Transfer_t *transfer);
+  virtual void disconnect();
+  static void callback(const Transfer_t *transfer);
+  void new_data(const Transfer_t *transfer);
+  void init();
+
+  // Bluetooth data
+  virtual bool claim_bluetooth(BluetoothController *driver, uint32_t bluetooth_class, uint8_t *remoteName);
+  virtual bool process_bluetooth_HID_data(const uint8_t *data, uint16_t length);
+  virtual bool remoteNameComplete(const uint8_t *remoteName);
+  virtual void release_bluetooth();
+
+
+protected:  // HID functions for extra keyboard data. 
+  virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage);
+  virtual void hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax);
+  virtual void hid_input_data(uint32_t usage, int32_t value);
+  virtual void hid_input_end();
+  virtual void disconnect_collection(Device_t *dev);
+
+private:
+  void update();
+  uint16_t convert_to_unicode(uint32_t mod, uint32_t key);
+  void key_press(uint32_t mod, uint32_t key);
+  void key_release(uint32_t mod, uint32_t key);
+  void (*keyPressedFunction)(int unicode);
+  void (*keyReleasedFunction)(int unicode);
+  Pipe_t *datapipe;
+  setup_t setup;
+  uint8_t report[8];
+  uint16_t keyCode;
+  uint8_t modifiers;
+  uint8_t keyOEM;
+  uint8_t prev_report[8];
+  KBDLeds_t leds_ = {0};
+  Pipe_t mypipes[2] __attribute__ ((aligned(32)));
+  Transfer_t mytransfers[4] __attribute__ ((aligned(32)));
+  strbuf_t mystring_bufs[1];
+
+  // Added to process secondary HID data. 
+  void (*extrasKeyPressedFunction)(uint32_t top, uint16_t code);
+  void (*extrasKeyReleasedFunction)(uint32_t top, uint16_t code);
+  uint32_t topusage_ = 0;         // What top report am I processing?
+  uint8_t collections_claimed_ = 0;
+  volatile bool hid_input_begin_ = false;
+  volatile bool hid_input_data_ = false;  // did we receive any valid data with report?
+  uint8_t count_keys_down_ = 0;
+  uint16_t keys_down[MAX_KEYS_DOWN];
+  bool  force_boot_protocol;  // User or VID/PID said force boot protocol?
+  bool control_queued;
+};
+
+
 USBHost myusb;
 USBHub hub1(myusb);
 USBHub hub2(myusb);
-KeyboardController keyboard1(myusb);
-KeyboardController keyboard2(myusb);
+KeyboardControllerExt keyboard1(myusb);
+KeyboardControllerExt keyboard2(myusb);
 USBHIDParser hid1(myusb);
 MouseController mouse1(myusb);
 uint32_t buttons_prev = 0;
@@ -131,6 +237,13 @@ USBHIDInput *hiddrivers[] = { &mouse1 };
 const char * hid_driver_names[CNT_DEVICES] = { "Mouse1" };
 bool hid_driver_active[CNT_DEVICES] = { false, false };
 bool show_changed_only = false; 
+
+uint8_t lastMods1, lastMods2;       // previous loop Shift & Control key states
+uint8_t newMods1, newMods2;         // this loop Shift & Control key states
+
+#define kUpModSendCount   5         // number of meta-key up g-pad packets to send
+int modSentCount;                   // number of meta-key up g-pad packets sent
+
 
 // Turn these on to see internal state as keys are pressed
 #if 0
@@ -157,9 +270,21 @@ void OnRelease( int key ) {
   clear_cmi_key();
 }
 
+
+#define USB_MOD_KEY_SHIFT                 0x22
+#define USB_MOD_KEY_CONTROL               0x11
+
+#define CMI_MOD_KEY_SHIFT                 0x10
+#define CMI_MOD_KEY_CONTROL               0x20
+
 void OnPress( int key )
 {
-  char cmi_val = key;                                                 // assume it is an alpha/num/symbol
+  char cmi_val = key;                                                 // assume it is an alpha/num/symbol  
+  uint8_t mods;           
+
+  DEBUG("mods: ");
+  DEBUG_HEX(mods);
+  DEBUG("\n");
   
   DEBUG("key '");
   switch (key) {
@@ -205,15 +330,19 @@ void OnPress( int key )
   DEBUG("'  ");
   DEBUG_HEX(key);
   DEBUG(" MOD: ");
+
+  // XXX this is not quite right
   
   if (keyboard1) {
-    DEBUG_HEX(keyboard1.getModifiers());
+    mods = keyboard1.getModifiers();
+    DEBUG_HEX(mods);
     DEBUG(" OEM: ");
     DEBUG_HEX(keyboard1.getOemKey());
     DEBUG(" LEDS: ");
     DEBUG_HEX(keyboard1.LEDS());
   } else {
-    DEBUG_HEX(keyboard2.getModifiers());
+    mods = keyboard2.getModifiers();
+    DEBUG_HEX(mods);
     DEBUG(" OEM: ");
     DEBUG_HEX(keyboard2.getOemKey());
     DEBUG(" LEDS: ");
@@ -222,9 +351,12 @@ void OnPress( int key )
 
   DEBUG("\n");
 
-  if( cmi_val ) {
-    send_cmi_key( cmi_val );
+  if( ((cmi_val & 0xf0) == 0x80) && is_series_3() ) {                       // SIII jams Shift & Ctl state into Function keys
+    if( mods & USB_MOD_KEY_SHIFT )   cmi_val |= CMI_MOD_KEY_SHIFT;          // Function keys care about Shift & Control
+    if( mods & USB_MOD_KEY_CONTROL ) cmi_val |= CMI_MOD_KEY_CONTROL;        // Thanks to Graham Johnson for finding this bug!  
   }
+
+  send_cmi_key( cmi_val );
 
   //Serial.print("key ");
   //Serial.print((char)keyboard1.getKey());
@@ -275,9 +407,6 @@ void send_cmi_char( char c ) {              // send a char that we want to flick
 
     if( !is_series_3() )                    // CMI just expects ASCII, no key-ups. Only send lower case to SIII
       c = toupper( c );
-
-    Serial.print("fuck" );
-    Serial.println(c);        // not here
       
     DEBUG_HEX( c );
     CMI_SERIAL.write( c );
@@ -325,25 +454,34 @@ bool      mouse_left_button;
   At 9,600 bps, that takes ~1ms/byte
 */
 
-void Send_GPad_Packet() {
+void Send_GPad_Packet( bool keysOnly ) {
   unsigned char b;
+  uint8_t mods = (lastMods1 | lastMods2);
 
   if( is_series_3() ) {                     // only send gpad messages to Series III
     digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
     loopcnt = 3500;  
     
     CMI_SERIAL.write( 0x80 );               // control byte
-  
+
     b = 0xe0;                               // 111p tsc0: p = pen on pad
                                             //            t = touch
                                             //            s = shift key down (keyboard i/f adds)
-                                            //        c = ctl key down (keyboard i/f adds)
-  
-    if ( mouse_left_button )
-      b |= 0x08;                            // touch
-  
-    if ( show_cursor_gpad )
-      b |= 0x10;                            // pen on pad
+                                            //            c = ctl key down (keyboard i/f adds)
+
+    if( mods & USB_MOD_KEY_SHIFT )
+      b |= 0x04;
+
+    if( mods & USB_MOD_KEY_CONTROL )
+      b |= 0x02;
+
+    if( !keysOnly ) {
+      if ( mouse_left_button )
+        b |= 0x08;                            // touch
+    
+      if ( show_cursor_gpad )
+        b |= 0x10;                            // pen on pad
+    }
   
     CMI_SERIAL.write( b );
   
@@ -360,7 +498,7 @@ void init_gpad() {
   last_gpad_x = gpad_x = (MAX_GPAD_X / 2);
   last_gpad_y = gpad_y = (MAX_GPAD_Y / 2);
 
-  Send_GPad_Packet();                       // get cursor on-screen and centered
+  Send_GPad_Packet( false );                // get cursor on-screen and centered
 }
 
 
@@ -381,7 +519,7 @@ void cmi_gpad_move( int8_t dx, int8_t dy ) {
     gpad_y = MAX_GPAD_Y;
 
 
-  Send_GPad_Packet();                 
+  Send_GPad_Packet( false );                 
 }
 
 
@@ -632,10 +770,15 @@ void setup()
   keyboard1.attachPress(OnPress);
   keyboard1.attachRelease(OnRelease);
 
-  delay ( 100 );
+  delay ( 50 );
   
   keyboard2.attachPress(OnPress);
   keyboard2.attachRelease(OnRelease);
+
+  delay( 50 );
+
+  keyboard1.forceBootProtocol();
+  keyboard2.forceBootProtocol();
 
   // ===============================
   // Set up MIDI
@@ -652,9 +795,12 @@ void setup()
   init_keypad();
 }  
 
+#define     kPeriodicModKeyUpdate         20
 
+elapsedMillis em;                                       // timer to send shift/ctl g-pad packet every 100ms
+    
 void loop()
-{
+{  
   // ===============================
   // Update Activity LED
   
@@ -750,7 +896,40 @@ void loop()
     }
   }
 
+  // ===============================
+  // Check for Shift or Control down, send so on-screen SIII UX hints can update
 
+  newMods1 = keyboard1.getModifiers();                          // XXX JOE -- modified class (below) keeps modifiers updated
+  newMods2 = keyboard2.getModifiers();
+
+  if( ((lastMods1 ^ newMods1) || (lastMods2 ^ newMods2)) && !(lastMods1 || lastMods2) ){      // edge(s), and all UP?
+    modSentCount = kUpModSendCount;
+  }
+
+  lastMods1 = newMods1;
+  lastMods2 = newMods2;
+  
+  // for an edge where modifier keys are DOWN, packets are sent as long as keys are down, at kPeriodicModKeyUpdate rate
+  // for an edge where modifier keys are ALL UP, packets are sent until modSentCount == 0
+  
+  if( lastMods1 || lastMods2 ) {                                // IF a mod key is down
+    if( em >= kPeriodicModKeyUpdate ) {                         // AND it has been at least kPeriodicMetaKeyUpdate ms since last G-Pad packet
+      em = 0;                                                   // zero timer
+      Send_GPad_Packet( true );                                 // and send it!
+    }
+  } else {
+    if( em >= kPeriodicModKeyUpdate ) {
+      if( modSentCount ) {
+        em = 0;
+        Send_GPad_Packet( true );                               // get on-screen UX updated quick
+        modSentCount--;                                         // only send kUpModSendCount of these, enough to update the UX
+      }
+    }
+  }
+
+  // ===============================
+  // Handle the mouse / on-screen cursor
+  
   if(mouse1.available()) {
     /*
     Serial.print("Mouse: buttons = ");
@@ -1450,3 +1629,619 @@ void led_display_string( char *s ) {
   }
 }
 
+
+
+
+/* ---------------------------------------------------------------------------------------
+  Gross but simple. 
+  We needed to modify the KeyboardController class to let us know when Shift and/or Control go up & down,
+    even if no other key is pressed.
+ */
+ 
+
+/* USB EHCI Host for Teensy 3.6
+ * Copyright 2017 Paul Stoffregen (paul@pjrc.com)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+//#include <Arduino.h>
+//#include "USBHost_t36.h"  // Read this header first for key info
+#include "keylayouts.h"   // from Teensyduino core library
+
+typedef struct {
+  KEYCODE_TYPE code;
+  uint8_t    ascii;
+} keycode_extra_t;
+
+typedef struct {
+  KEYCODE_TYPE code;
+  KEYCODE_TYPE codeNumlockOff;
+  uint8_t charNumlockOn;    // We will assume when num lock is on we have all characters...
+} keycode_numlock_t;
+
+typedef struct {
+  uint16_t  idVendor;   // vendor id of keyboard
+  uint16_t  idProduct;    // product id - 0 implies all of the ones from vendor; 
+} keyboard_force_boot_protocol_t; // list of products to force into boot protocol
+
+#ifdef M
+#undef M
+#endif
+#define M(n) ((n) & KEYCODE_MASK)
+
+static const keycode_extra_t keycode_extras[] = {
+  {M(KEY_ENTER), '\n'},
+  {M(KEY_ESC), 0x1b},
+  {M(KEY_TAB), 0x9 },
+  {M(KEY_UP), KEYD_UP },
+  {M(KEY_DOWN), KEYD_DOWN },
+  {M(KEY_LEFT), KEYD_LEFT },
+  {M(KEY_RIGHT), KEYD_RIGHT },
+  {M(KEY_INSERT), KEYD_INSERT },
+  {M(KEY_DELETE), KEYD_DELETE }, 
+  {M(KEY_PAGE_UP), KEYD_PAGE_UP },
+  {M(KEY_PAGE_DOWN), KEYD_PAGE_DOWN }, 
+  {M(KEY_HOME), KEYD_HOME },
+  {M(KEY_END), KEYD_END },   
+  {M(KEY_F1), KEYD_F1 },
+  {M(KEY_F2), KEYD_F2 },     
+  {M(KEY_F3), KEYD_F3 },     
+  {M(KEY_F4), KEYD_F4 },     
+  {M(KEY_F5), KEYD_F5 },     
+  {M(KEY_F6), KEYD_F6 },     
+  {M(KEY_F7), KEYD_F7 },     
+  {M(KEY_F8), KEYD_F8 },     
+  {M(KEY_F9), KEYD_F9  },     
+  {M(KEY_F10), KEYD_F10 },    
+  {M(KEY_F11), KEYD_F11 },    
+  {M(KEY_F12), KEYD_F12 }    
+};
+
+// Some of these mapped to key + shift.
+static const keycode_numlock_t keycode_numlock[] = {
+  {M(KEYPAD_SLASH),   '/', '/'},
+  {M(KEYPAD_ASTERIX), '*', '*'},
+  {M(KEYPAD_MINUS), '-', '-'},
+  {M(KEYPAD_PLUS),  '+', '+'},
+  {M(KEYPAD_ENTER),   '\n', '\n'},
+  {M(KEYPAD_1),     0x80 | M(KEY_END), '1'},
+  {M(KEYPAD_2),     0x80 | M(KEY_DOWN), '2'},
+  {M(KEYPAD_3),     0x80 | M(KEY_PAGE_DOWN), '3'},
+  {M(KEYPAD_4),     0x80 | M(KEY_LEFT), '4'},
+  {M(KEYPAD_5),     0x00, '5'},
+  {M(KEYPAD_6),     0x80 | M(KEY_RIGHT), '6'},
+  {M(KEYPAD_7),     0x80 | M(KEY_HOME),  '7'},
+  {M(KEYPAD_8),     0x80 | M(KEY_UP),  '8'},
+  {M(KEYPAD_9),     0x80 | M(KEY_PAGE_UP), '9'},
+  {M(KEYPAD_0),     0x80 | M(KEY_INSERT), '0'},
+  {M(KEYPAD_PERIOD),  0x80 | M(KEY_DELETE), '.'}
+};
+
+static const keyboard_force_boot_protocol_t keyboard_forceBootMode[] = {
+  {0x04D9, 0}
+};
+
+
+#define print   USBHost::print_
+#define println USBHost::println_
+
+
+
+
+void KeyboardControllerExt::init()
+{
+  contribute_Pipes(mypipes, sizeof(mypipes)/sizeof(Pipe_t));
+  contribute_Transfers(mytransfers, sizeof(mytransfers)/sizeof(Transfer_t));
+  contribute_String_Buffers(mystring_bufs, sizeof(mystring_bufs)/sizeof(strbuf_t));
+  driver_ready_for_device(this);
+  USBHIDParser::driver_ready_for_hid_collection(this);
+  BluetoothController::driver_ready_for_bluetooth(this);
+  force_boot_protocol = false;  // start off assuming not
+}
+
+bool KeyboardControllerExt::claim(Device_t *dev, int type, const uint8_t *descriptors, uint32_t len)
+{
+  println("KeyboardController claim this=", (uint32_t)this, HEX);
+
+  // only claim at interface level
+  if (type != 1) return false;
+  if (len < 9+9+7) return false;
+  print_hexbytes(descriptors, len);
+
+  uint32_t numendpoint = descriptors[4];
+  if (numendpoint < 1) return false;
+  if (descriptors[5] != 3) return false; // bInterfaceClass, 3 = HID
+  if (descriptors[6] != 1) return false; // bInterfaceSubClass, 1 = Boot Device
+  if (descriptors[7] != 1) return false; // bInterfaceProtocol, 1 = Keyboard
+  if (descriptors[9] != 9) return false;
+  if (descriptors[10] != 33) return false; // HID descriptor (ignored, Boot Protocol)
+  if (descriptors[18] != 7) return false;
+  if (descriptors[19] != 5) return false; // endpoint descriptor
+  uint32_t endpoint = descriptors[20];
+  println("ep = ", endpoint, HEX);
+  if ((endpoint & 0xF0) != 0x80) return false; // must be IN direction
+  endpoint &= 0x0F;
+  if (endpoint == 0) return false;
+  if (descriptors[21] != 3) return false; // must be interrupt type
+  uint32_t size = descriptors[22] | (descriptors[23] << 8);
+  println("packet size = ", size);
+  if ((size < 8) || (size > 64)) {
+    return false; // Keyboard Boot Protocol is 8 bytes, but maybe others have longer... 
+  }
+#ifdef USBHS_KEYBOARD_INTERVAL 
+  uint32_t interval = USBHS_KEYBOARD_INTERVAL;
+#else
+  uint32_t interval = descriptors[24];
+#endif
+  println("polling interval = ", interval);
+  datapipe = new_Pipe(dev, 3, endpoint, 1, 8, interval);
+  datapipe->callback_function = callback;
+  queue_Data_Transfer(datapipe, report, 8, this);
+
+  // see if this device in list of devices that need to be set in
+  // boot protocol mode
+  bool in_forceBoot_mode_list = false;
+  for (uint8_t i = 0; i < sizeof(keyboard_forceBootMode)/sizeof(keyboard_forceBootMode[0]); i++) {
+    if (dev->idVendor == keyboard_forceBootMode[i].idVendor) {
+      if ((dev->idProduct == keyboard_forceBootMode[i].idProduct) ||
+          (keyboard_forceBootMode[i].idProduct == 0)) {
+        in_forceBoot_mode_list = true;
+        break;
+      }
+    }
+  }
+  if (in_forceBoot_mode_list) {
+    println("SET_PROTOCOL Boot");
+    mk_setup(setup, 0x21, 11, 0, 0, 0); // 11=SET_PROTOCOL  BOOT
+  } else {
+    mk_setup(setup, 0x21, 10, 0, 0, 0); // 10=SET_IDLE
+  }
+  queue_Control_Transfer(dev, &setup, NULL, this);
+  control_queued = true;
+  return true;
+}
+
+void KeyboardControllerExt::control(const Transfer_t *transfer)
+{
+  println("control callback (keyboard)");
+  control_queued = false;
+  print_hexbytes(transfer->buffer, transfer->length);
+  // To decode hex dump to human readable HID report summary:
+  //   http://eleccelerator.com/usbdescreqparser/
+  uint32_t mesg = transfer->setup.word1;
+  println("  mesg = ", mesg, HEX);
+  if (mesg == 0x00B21 && transfer->length == 0) { // SET_PROTOCOL
+    mk_setup(setup, 0x21, 10, 0, 0, 0); // 10=SET_IDLE
+    control_queued = true;
+    queue_Control_Transfer(device, &setup, NULL, this);
+  } else if (force_boot_protocol) {
+    forceBootProtocol();  // lets setup to do the boot protocol
+    force_boot_protocol = false;  // turn back off
+  }
+}
+
+void KeyboardControllerExt::callback(const Transfer_t *transfer)
+{
+  //println("KeyboardController Callback (static)");
+  if (transfer->driver) {
+    ((KeyboardControllerExt *)(transfer->driver))->new_data(transfer);
+  }
+}
+
+void KeyboardControllerExt::forceBootProtocol()
+{
+  if (device && !control_queued) {
+    mk_setup(setup, 0x21, 11, 0, 0, 0); // 11=SET_PROTOCOL  BOOT
+    control_queued = true;
+    queue_Control_Transfer(device, &setup, NULL, this);   
+  } else {
+    force_boot_protocol = true; // let system know we want to force this.
+  }
+}
+
+void KeyboardControllerExt::disconnect()
+{
+  // TODO: free resources
+}
+
+
+// Arduino defined this static weak symbol callback, and their
+// examples use it as the only way to detect new key presses,
+// so unfortunate as static weak callbacks are, it probably
+// needs to be supported for compatibility
+extern "C" {
+void __keyboardControllerExtEmptyCallback() { }
+}
+void keyPressed()  __attribute__ ((weak, alias("__keyboardControllerExtEmptyCallback")));
+void keyReleased() __attribute__ ((weak, alias("__keyboardControllerExtEmptyCallback")));
+
+static bool contains(uint8_t b, const uint8_t *data)
+{
+  if (data[2] == b || data[3] == b || data[4] == b) return true;
+  if (data[5] == b || data[6] == b || data[7] == b) return true;
+  return false;
+}
+
+void KeyboardControllerExt::new_data(const Transfer_t *transfer)
+{
+  println("KeyboardController Callback (member)");
+  print("  KB Data: ");
+  print_hexbytes(transfer->buffer, 8);
+
+  modifiers = report[0];            // XXX JOE - always set the mod key bits, the CMI main loop
+                                    //           code above polls them using getModifiers()
+                                    //           so the SIII UI will update properly
+  
+  for (int i=2; i < 8; i++) {
+    uint32_t key = prev_report[i];
+    if (key >= 4 && !contains(key, report)) {
+      key_release(prev_report[0], key);
+    }
+  }
+  for (int i=2; i < 8; i++) {
+    uint32_t key = report[i];
+    if (key >= 4 && !contains(key, prev_report)) {
+      key_press(report[0], key);
+    }
+  }
+  memcpy(prev_report, report, 8);
+  queue_Data_Transfer(datapipe, report, 8, this);
+}
+
+
+void KeyboardControllerExt::numLock(bool f) {
+  if (leds_.numLock != f) {
+    leds_.numLock = f;
+    updateLEDS();
+  }
+}
+
+void KeyboardControllerExt::capsLock(bool f) {
+  if (leds_.capsLock != f) {
+    leds_.capsLock = f;
+    updateLEDS();
+  }
+}
+
+void KeyboardControllerExt::scrollLock(bool f) {
+  if (leds_.scrollLock != f) {
+    leds_.scrollLock = f;
+    updateLEDS();
+  }
+}
+
+void KeyboardControllerExt::key_press(uint32_t mod, uint32_t key)
+{
+  // TODO: queue events, perform callback from Task
+  println("  press, key=", key);
+  modifiers = mod;
+  keyOEM = key;
+  keyCode = convert_to_unicode(mod, key);
+  println("  unicode = ", keyCode);
+  if (keyPressedFunction) {
+    keyPressedFunction(keyCode);
+  } else {
+    keyPressed();
+  }
+}
+
+void KeyboardControllerExt::key_release(uint32_t mod, uint32_t key)
+{
+  // TODO: queue events, perform callback from Task
+  println("  release, key=", key);
+  modifiers = mod;
+  keyOEM = key;
+
+  // Look for modifier keys
+  if (key == M(KEY_NUM_LOCK)) {
+    numLock(!leds_.numLock);
+    // Lets toggle Numlock
+  } else if (key == M(KEY_CAPS_LOCK)) {
+    capsLock(!leds_.capsLock);
+
+  } else if (key == M(KEY_SCROLL_LOCK)) {
+    scrollLock(!leds_.scrollLock);
+  } else {
+    keyCode = convert_to_unicode(mod, key);
+    if (keyReleasedFunction) {
+      keyReleasedFunction(keyCode);
+    } else {
+      keyReleased();
+    }
+  }
+}
+
+uint16_t KeyboardControllerExt::convert_to_unicode(uint32_t mod, uint32_t key)
+{
+  // WIP: special keys
+  // TODO: dead key sequences
+
+
+  if (key & SHIFT_MASK) {
+    // Many of these keys will look like they are other keys with shift mask...
+    // Check for any of our mapped extra keys
+    for (uint8_t i = 0; i < (sizeof(keycode_numlock)/sizeof(keycode_numlock[0])); i++) {
+      if (keycode_numlock[i].code == key) {
+        // See if the user is using numlock or not...
+        if (leds_.numLock) {
+          return keycode_numlock[i].charNumlockOn;
+        } else {
+          key = keycode_numlock[i].codeNumlockOff;
+          if (!(key & 0x80)) return key;  // we have hard coded value
+          key &= 0x7f;  // mask off the extra and break out to process as other characters...
+          break;
+        }
+      }
+    }
+  }
+
+  // Check for any of our mapped extra keys - Done early as some of these keys are 
+  // above and some below the SHIFT_MASK value
+  for (uint8_t i = 0; i < (sizeof(keycode_extras)/sizeof(keycode_extras[0])); i++) {
+    if (keycode_extras[i].code == key) {
+      return keycode_extras[i].ascii;
+    }
+  }
+
+  // If we made it here without doing something then return 0;
+  if (key & SHIFT_MASK) return 0;
+
+  if ((mod & 0x02) || (mod & 0x20)) key |= SHIFT_MASK;
+  if (leds_.capsLock) key ^= SHIFT_MASK;    // Caps lock will switch the Shift;
+  for (int i=0; i < 96; i++) {
+    if (keycodes_ascii[i] == key) {
+      if ((mod & 1) || (mod & 0x10)) return (i+32) & 0x1f;  // Control key is down
+      return i + 32;
+    }
+  }
+
+
+#ifdef ISO_8859_1_A0
+  for (int i=0; i < 96; i++) {
+    if (keycodes_iso_8859_1[i] == key) return i + 160;
+  }
+#endif
+  return 0;
+}
+
+void KeyboardControllerExt::LEDS(uint8_t leds) {
+  println("Keyboard setLEDS ", leds, HEX);
+  leds_.byte = leds;
+  updateLEDS();
+}
+
+void KeyboardControllerExt::updateLEDS() {
+  // Now lets tell keyboard new state.
+  if (device != nullptr) {
+    // Only do it this way if we are a standard USB device
+    mk_setup(setup, 0x21, 9, 0x200, 0, sizeof(leds_.byte)); // hopefully this sets leds
+    queue_Control_Transfer(device, &setup, &leds_.byte, this);
+  } else {
+    // Bluetooth, need to setup back channel to Bluetooth controller. 
+  }
+}
+
+//=============================================================================
+// Keyboard Extras - Combined from other object
+//=============================================================================
+
+#define TOPUSAGE_SYS_CONTROL  0x10080
+#define TOPUSAGE_CONSUMER_CONTROL 0x0c0001
+
+hidclaim_t KeyboardControllerExt::claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage)
+{
+  // Lets try to claim a few specific Keyboard related collection/reports
+  //USBHDBGSerial.printf("KBH Claim %x\n", topusage);
+  if ((topusage != TOPUSAGE_SYS_CONTROL) 
+    && (topusage != TOPUSAGE_CONSUMER_CONTROL)
+    ) return CLAIM_NO;
+  // only claim from one physical device
+  //USBHDBGSerial.println("KeyboardController claim collection");
+  // Lets only claim if this is the same device as claimed Keyboard... 
+  if (dev != device) return CLAIM_NO;
+  if (mydevice != NULL && dev != mydevice) return CLAIM_NO;
+  mydevice = dev;
+  collections_claimed_++;
+  return CLAIM_REPORT;
+}
+
+void KeyboardControllerExt::disconnect_collection(Device_t *dev)
+{
+  if (--collections_claimed_ == 0) {
+    mydevice = NULL;
+  }
+}
+
+void KeyboardControllerExt::hid_input_begin(uint32_t topusage, uint32_t type, int lgmin, int lgmax)
+{
+  //USBHDBGSerial.printf("KPC:hid_input_begin TUSE: %x TYPE: %x Range:%x %x\n", topusage, type, lgmin, lgmax);
+  topusage_ = topusage; // remember which report we are processing. 
+  hid_input_begin_ = true;
+  hid_input_data_ = false;
+}
+
+void KeyboardControllerExt::hid_input_data(uint32_t usage, int32_t value)
+{
+  // Hack ignore 0xff00 high words as these are user values... 
+  if ((usage & 0xffff0000) == 0xff000000) return; 
+  //USBHDBGSerial.printf("KeyboardController: topusage= %x usage=%X, value=%d\n", topusage_, usage, value);
+
+  // See if the value is in our keys_down list
+  usage &= 0xffff;    // only keep the actual key
+  if (usage == 0) return; // lets not process 0, if only 0 happens, we will handle it on the end to remove existing pressed items.
+
+  // Remember if we have received any logical key up events.  Some keyboard appear to send them
+  // others do no...
+  hid_input_data_ = true;
+
+  uint8_t key_index;
+  for (key_index = 0; key_index < count_keys_down_; key_index++) {
+    if (keys_down[key_index] == usage) {
+      if (value) return;    // still down
+
+      if (extrasKeyReleasedFunction) {
+        extrasKeyReleasedFunction(topusage_, usage);
+      }
+
+      // Remove from list
+      count_keys_down_--;
+      for (;key_index < count_keys_down_; key_index++) {
+        keys_down[key_index] = keys_down[key_index+1];
+      }
+      return;
+    }
+  }
+  // Was not in list
+  if (!value) return; // still 0
+  if (extrasKeyPressedFunction) {
+    extrasKeyPressedFunction(topusage_, usage);
+  }
+  if (count_keys_down_ < MAX_KEYS_DOWN) {
+    keys_down[count_keys_down_++] = usage;
+  }
+}
+
+void KeyboardControllerExt::hid_input_end()
+{
+  //USBHDBGSerial.println("KPC:hid_input_end");
+  if (hid_input_begin_) {
+
+    // See if we received any data from parser if not, assume all keys released... 
+    if (!hid_input_data_ ) {
+      if (extrasKeyReleasedFunction) {
+        while (count_keys_down_) {
+          count_keys_down_--;
+          extrasKeyReleasedFunction(topusage_, keys_down[count_keys_down_]);
+        }
+      }
+      count_keys_down_ = 0;
+    }
+
+    hid_input_begin_ = false;
+  }   
+}
+
+bool KeyboardControllerExt::claim_bluetooth(BluetoothController *driver, uint32_t bluetooth_class, uint8_t *remoteName) 
+{
+  USBHDBGSerial.printf("Keyboard Controller::claim_bluetooth - Class %x\n", bluetooth_class);
+  if ((((bluetooth_class & 0xff00) == 0x2500) || (((bluetooth_class & 0xff00) == 0x500))) && (bluetooth_class & 0x40)) {
+    if (remoteName && (strncmp((const char *)remoteName, "PLAYSTATION(R)3", 15) == 0)) {
+      USBHDBGSerial.printf("KeyboardController::claim_bluetooth Reject PS3 hack\n");
+      return false;
+    }
+    USBHDBGSerial.printf("KeyboardController::claim_bluetooth TRUE\n");
+    //btdevice = driver;
+    return true;
+  }
+  return false;
+}
+
+bool KeyboardControllerExt::remoteNameComplete(const uint8_t *remoteName) 
+{
+  // Real Hack some PS3 controllers bluetoot class is keyboard... 
+  if (strncmp((const char *)remoteName, "PLAYSTATION(R)3", 15) == 0) {
+    USBHDBGSerial.printf("  KeyboardController::remoteNameComplete %s - Oops PS3 unclaim\n", remoteName);
+    return false;
+  }
+  return true;
+}
+
+
+
+
+bool KeyboardControllerExt::process_bluetooth_HID_data(const uint8_t *data, uint16_t length) 
+{
+  // Example DATA from bluetooth keyboard:
+  //                  0  1 2 3 4 5  6 7  8 910 1 2 3 4 5 6 7
+  //                           LEN         D
+  //BT rx2_data(18): 48 20 e 0 a 0 70 0 a1 1 2 0 0 0 0 0 0 0 
+  //BT rx2_data(18): 48 20 e 0 a 0 70 0 a1 1 2 0 4 0 0 0 0 0 
+  //BT rx2_data(18): 48 20 e 0 a 0 70 0 a1 1 2 0 0 0 0 0 0 0 
+  // So Len=9 passed in data starting at report ID=1... 
+  USBHDBGSerial.printf("KeyboardController::process_bluetooth_HID_data\n");
+  if (data[0] != 1) return false;
+  print("  KB Data: ");
+  print_hexbytes(data, length);
+  for (int i=2; i < length; i++) {
+    uint32_t key = prev_report[i];
+    if (key >= 4 && !contains(key, report)) {
+      key_release(prev_report[0], key);
+    }
+  }
+  for (int i=2; i < 8; i++) {
+    uint32_t key = data[i];
+    if (key >= 4 && !contains(key, prev_report)) {
+      key_press(data[1], key);
+    }
+  }
+  // Save away the data.. But shift down one byte... Don't need the report number
+  memcpy(prev_report, &data[1], 8);
+  return true;
+}
+
+void KeyboardControllerExt::release_bluetooth() 
+{
+  //btdevice = nullptr;
+}
+
+//*****************************************************************************
+// Some simple query functions depend on which interface we are using...
+//*****************************************************************************
+
+uint16_t KeyboardControllerExt::idVendor() 
+{
+  if (device != nullptr) return device->idVendor;
+  if (mydevice != nullptr) return mydevice->idVendor;
+  if (btdevice != nullptr) return btdevice->idVendor;
+  return 0;
+}
+
+uint16_t KeyboardControllerExt::idProduct() 
+{
+  if (device != nullptr) return device->idProduct;
+  if (mydevice != nullptr) return mydevice->idProduct;
+  if (btdevice != nullptr) return btdevice->idProduct;
+  return 0;
+}
+
+const uint8_t *KeyboardControllerExt::manufacturer()
+{
+  if ((device != nullptr) && (device->strbuf != nullptr)) return &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_MAN]];
+  if ((btdevice != nullptr) && (btdevice->strbuf != nullptr)) return &btdevice->strbuf->buffer[btdevice->strbuf->iStrings[strbuf_t::STR_ID_MAN]]; 
+  if ((mydevice != nullptr) && (mydevice->strbuf != nullptr)) return &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_MAN]]; 
+  return nullptr;
+}
+
+const uint8_t *KeyboardControllerExt::product()
+{
+  if ((device != nullptr) && (device->strbuf != nullptr)) return &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_PROD]];
+  if ((mydevice != nullptr) && (mydevice->strbuf != nullptr)) return &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_PROD]]; 
+  if ((btdevice != nullptr) && (btdevice->strbuf != nullptr)) return &btdevice->strbuf->buffer[btdevice->strbuf->iStrings[strbuf_t::STR_ID_PROD]]; 
+  return nullptr;
+}
+
+const uint8_t *KeyboardControllerExt::serialNumber()
+{
+  if ((device != nullptr) && (device->strbuf != nullptr)) return &device->strbuf->buffer[device->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]];
+  if ((mydevice != nullptr) && (mydevice->strbuf != nullptr)) return &mydevice->strbuf->buffer[mydevice->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; 
+  if ((btdevice != nullptr) && (btdevice->strbuf != nullptr)) return &btdevice->strbuf->buffer[btdevice->strbuf->iStrings[strbuf_t::STR_ID_SERIAL]]; 
+  return nullptr;
+}
