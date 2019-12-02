@@ -24,7 +24,9 @@
 
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
 
-    2/3/19  v1.3    Added support for HDSP-21xx displays, made i2c probe more robust
+    11/30/19  v1.4    Fixed Shift/Control behavior for on-screen icons and Function keys
+                      Removed debug code previously left in.
+    2/3/19    v1.3    Added support for HDSP-21xx displays, made i2c probe more robust
     
  */
 
