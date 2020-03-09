@@ -24,14 +24,15 @@
 
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
 
+    3/7/20    v1.5    Fixed problem with mice sometimes not being recognized at boot
     11/30/19  v1.4    Fixed Shift/Control behavior for on-screen icons and Function keys
                       Removed debug code previously left in.
     2/3/19    v1.3    Added support for HDSP-21xx displays, made i2c probe more robust
     
  */
 
-#define   FIRMWARE_VERSION          4
-#define   FIRMWARE_VERSION_TEXT     "VERSION 1.4 "
+#define   FIRMWARE_VERSION          5
+#define   FIRMWARE_VERSION_TEXT     "VERSION 1.5 "
 
 #include <elapsedMillis.h>
 
@@ -83,9 +84,9 @@ void led_blink_version( char vers ) {
 
   for( int xxx = 0; xxx != vers; xxx++ ) {    // version shown as # of red blinks
     led_red( 1 );
-    delay( 250 );
+    delay( 150 );
     led_red( 0 );
-    delay( 350 );
+    delay( 250 );
   }
 }
 
@@ -218,18 +219,22 @@ private:
 
 USBHost myusb;
 USBHub hub1(myusb);
-USBHub hub2(myusb);
+
 KeyboardControllerExt keyboard1(myusb);
-KeyboardControllerExt keyboard2(myusb);
+
 USBHIDParser hid1(myusb);
+USBHIDParser hid2(myusb);
+
 MouseController mouse1(myusb);
+
 uint32_t buttons_prev = 0;
 
-USBDriver *drivers[] = { &hub1, &hub2, &keyboard1, &keyboard2, &hid1 };
+USBDriver *drivers[] = { &hub1, &keyboard1, &hid1, &hid2 };
 
 #define CNT_DEVICES (sizeof(drivers)/sizeof(drivers[0]))
 
-const char * driver_names[CNT_DEVICES] = { "Hub1","Hub2", "KB1", "KB2", "HID1" };
+const char * driver_names[CNT_DEVICES] = { "Hub1", "KB1", "HID1" , "HID2" };
+
 bool driver_active[CNT_DEVICES] = { false, false, false, false };
 
 USBHIDInput *hiddrivers[] = { &mouse1 };
@@ -240,8 +245,8 @@ const char * hid_driver_names[CNT_DEVICES] = { "Mouse1" };
 bool hid_driver_active[CNT_DEVICES] = { false, false };
 bool show_changed_only = false; 
 
-uint8_t lastMods1, lastMods2;       // previous loop Shift & Control key states
-uint8_t newMods1, newMods2;         // this loop Shift & Control key states
+uint8_t lastMods1;                  // previous loop Shift & Control key states
+uint8_t newMods1;                   // this loop Shift & Control key states
 
 #define kUpModSendCount   5         // number of meta-key up g-pad packets to send
 int modSentCount;                   // number of meta-key up g-pad packets sent
@@ -261,8 +266,6 @@ char OEMKey() {
   
   if (keyboard1) {
     oem = keyboard1.getOemKey();
-  } else {
-    oem = keyboard2.getOemKey();
   }
 
   return oem;
@@ -332,8 +335,6 @@ void OnPress( int key )
   DEBUG("'  ");
   DEBUG_HEX(key);
   DEBUG(" MOD: ");
-
-  // XXX this is not quite right
   
   if (keyboard1) {
     mods = keyboard1.getModifiers();
@@ -342,13 +343,6 @@ void OnPress( int key )
     DEBUG_HEX(keyboard1.getOemKey());
     DEBUG(" LEDS: ");
     DEBUG_HEX(keyboard1.LEDS());
-  } else {
-    mods = keyboard2.getModifiers();
-    DEBUG_HEX(mods);
-    DEBUG(" OEM: ");
-    DEBUG_HEX(keyboard2.getOemKey());
-    DEBUG(" LEDS: ");
-    DEBUG_HEX(keyboard2.LEDS());
   }
 
   DEBUG("\n");
@@ -362,8 +356,6 @@ void OnPress( int key )
 
   //Serial.print("key ");
   //Serial.print((char)keyboard1.getKey());
-  //Serial.print("  ");
-  //Serial.print((char)keyboard2.getKey());
   //Serial.println();
 }
 
@@ -458,7 +450,7 @@ bool      mouse_left_button;
 
 void Send_GPad_Packet( bool keysOnly ) {
   unsigned char b;
-  uint8_t mods = (lastMods1 | lastMods2);
+  uint8_t mods = lastMods1;
 
   if( is_series_3() ) {                     // only send gpad messages to Series III
     digitalWrite( ACT_LED, false );         // make LED flicker, will be turned back on in main loop
@@ -764,23 +756,13 @@ void setup()
 
   // ===============================
   // Set up USB
-  
+
   myusb.begin();
 
   delay( 100 );
   
   keyboard1.attachPress(OnPress);
   keyboard1.attachRelease(OnRelease);
-
-  delay ( 50 );
-  
-  keyboard2.attachPress(OnPress);
-  keyboard2.attachRelease(OnRelease);
-
-  delay( 50 );
-
-  keyboard1.forceBootProtocol();
-  keyboard2.forceBootProtocol();
 
   // ===============================
   // Set up MIDI
@@ -902,19 +884,17 @@ void loop()
   // Check for Shift or Control down, send so on-screen SIII UX hints can update
 
   newMods1 = keyboard1.getModifiers();                          // XXX JOE -- modified class (below) keeps modifiers updated
-  newMods2 = keyboard2.getModifiers();
 
-  if( ((lastMods1 ^ newMods1) || (lastMods2 ^ newMods2)) && !(lastMods1 || lastMods2) ){      // edge(s), and all UP?
+  if( (lastMods1 ^ newMods1) && !lastMods1 ) {                  // edge(s), and all UP?
     modSentCount = kUpModSendCount;
   }
 
   lastMods1 = newMods1;
-  lastMods2 = newMods2;
   
   // for an edge where modifier keys are DOWN, packets are sent as long as keys are down, at kPeriodicModKeyUpdate rate
   // for an edge where modifier keys are ALL UP, packets are sent until modSentCount == 0
   
-  if( lastMods1 || lastMods2 ) {                                // IF a mod key is down
+  if( lastMods1 ) {                                             // IF a mod key is down
     if( em >= kPeriodicModKeyUpdate ) {                         // AND it has been at least kPeriodicMetaKeyUpdate ms since last G-Pad packet
       em = 0;                                                   // zero timer
       Send_GPad_Packet( true );                                 // and send it!
