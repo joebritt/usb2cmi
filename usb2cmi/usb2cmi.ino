@@ -24,6 +24,9 @@
 
     USB code based on public domain example "Mouse" from USBHost_t36 by Paul Stoffregren / PJRC.
 
+    7/18/21   v1.6    Fixed Shift/Control behavior for arrow keys on Series III. Thanks to Cris Blyth and
+                       Andrei Kudryavtsev for finding that bug and letting me know about it!
+                      Apple USB keyboards have F13, F14, and F15 keys. Map those to CMI F13, F14, and F15.
     3/7/20    v1.5    Fixed problem with mice sometimes not being recognized at boot
     11/30/19  v1.4    Fixed Shift/Control behavior for on-screen icons and Function keys
                       Removed debug code previously left in.
@@ -31,8 +34,8 @@
     
  */
 
-#define   FIRMWARE_VERSION          5
-#define   FIRMWARE_VERSION_TEXT     "VERSION 1.5 "
+#define   FIRMWARE_VERSION          6
+#define   FIRMWARE_VERSION_TEXT     "VERSION 1.6 "
 
 #include <elapsedMillis.h>
 
@@ -293,6 +296,7 @@ void OnPress( int key )
   
   DEBUG("key '");
   switch (key) {
+                          
     case KEYD_UP:         cmi_val = 0x1c;   DEBUG("UP");    break;    // CMI up arrow
     case KEYD_DOWN:       cmi_val = 0x1d;   DEBUG("DN");    break;    // CMI down arrow
     case KEYD_LEFT:       cmi_val = 0x1f;   DEBUG("LEFT");  break;    // CMI left arrow
@@ -327,6 +331,11 @@ void OnPress( int key )
                             case 0x47:      cmi_val = 0x8e;   DEBUG("ScrLk");     break;    // CMI F14
                             case 0x48:      cmi_val = 0x8f;   DEBUG("Pause");     break;    // CMI F15
                             case 0x2a:      cmi_val = 0x7f;   DEBUG("Bksp");      break;    // CMI Rub Out
+
+                            // Apple keyboard has F13, F14, F15
+                            case 0x68:      cmi_val = 0x8d;   DEBUG("F13");       break;    // CMI F13
+                            case 0x69:      cmi_val = 0x8e;   DEBUG("F14");       break;    // CMI F14
+                            case 0x6a:      cmi_val = 0x8f;   DEBUG("F15");       break;    // CMI F15
                           }
                           break;
                           
@@ -346,6 +355,43 @@ void OnPress( int key )
   }
 
   DEBUG("\n");
+
+  /*  Arrow keys are special on Series III, different codes sent for shift or ctrl down.
+      (If both shift and ctrl down, ctrl wins.)
+      
+      Thanks to Andrei Kudryavtsev and Cris Blyth for finding this!
+      
+                  shift   ctl       if both pressed, ctl wins
+         ->  1e   de      d6        0001 1110  /  1101 1110  /  1101 0110
+         <-  1f   df      d7
+         ^   1c   dc      d4
+         v   1d   dd      d5
+  */
+                          
+  if( is_series_3() ) {
+      switch (cmi_val) {
+                            
+      case 0x1c:  // CMI up arrow
+                  if( mods & USB_MOD_KEY_SHIFT )   cmi_val = 0xdc;
+                  if( mods & USB_MOD_KEY_CONTROL ) cmi_val = 0xd4;
+                  break;    
+                                                              
+      case 0x1d:  // CMI up arrow
+                  if( mods & USB_MOD_KEY_SHIFT )   cmi_val = 0xdd;
+                  if( mods & USB_MOD_KEY_CONTROL ) cmi_val = 0xd5;
+                  break;
+                                                              
+      case 0x1f:  // CMI left arrow  
+                  if( mods & USB_MOD_KEY_SHIFT )   cmi_val = 0xdf;
+                  if( mods & USB_MOD_KEY_CONTROL ) cmi_val = 0xd7;
+                  break;    
+                                                              
+      case 0x1e:  // CMI right arrow   
+                  if( mods & USB_MOD_KEY_SHIFT )   cmi_val = 0xde;
+                  if( mods & USB_MOD_KEY_CONTROL ) cmi_val = 0xd6;
+                  break;    
+      }  
+  }
 
   if( ((cmi_val & 0xf0) == 0x80) && is_series_3() ) {                       // SIII jams Shift & Ctl state into Function keys
     if( mods & USB_MOD_KEY_SHIFT )   cmi_val |= CMI_MOD_KEY_SHIFT;          // Function keys care about Shift & Control
@@ -401,8 +447,11 @@ void send_cmi_char( char c ) {              // send a char that we want to flick
 
     if( !is_series_3() )                    // CMI just expects ASCII, no key-ups. Only send lower case to SIII
       c = toupper( c );
-      
+
+    DEBUG("To CMI: ");
     DEBUG_HEX( c );
+    DEBUG("\n");
+    
     CMI_SERIAL.write( c );
 }
 
